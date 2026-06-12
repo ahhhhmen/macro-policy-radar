@@ -1,0 +1,36 @@
+version: "2.0"
+# 1. 靶向官方源（保持原样，作为一锤定音的底座）
+macro_sources:
+  - id: "id_esdm_news"
+    country: "ID"
+    agency: "印尼能源与矿产资源部"
+    feed_type: "html"
+    url: "https://www.esdm.go.id/en/news-center/news-archives"
+    dom_selector: "div.content__posts"
+    enabled: true
+
+# 2. 升维：关键词动态全球聚合网（通过布尔逻辑天网，防遗漏）
+dynamic_aggregators:
+  - id: "agg_lithium_africa"
+    type: "google_news_rss"
+    mineral_focus: ["Lithium"]
+    # 使用 Google News 高级布尔语法，精准锁定非洲核心锂矿国的出口与税收壁垒
+    query: 'Lithium AND ("Export Ban" OR "Beneficiation" OR "Royalty" OR "Tax") AND (Zimbabwe OR Ghana OR "Democratic Republic of Congo")'
+    time_window: "7d" # 仅抓取最近 7 天的动态，防止信息过载
+    enabled: true
+
+  - id: "agg_nickel_sea"
+    type: "google_news_rss"
+    mineral_focus: ["Nickel"]
+    # 锁定东南亚（印尼、菲律宾）的配额（RKAB）与出口限制博弈
+    query: 'Nickel AND ("Export Permit" OR "Tax" OR "RKAB" OR "Quota" OR "Smelter") AND (Indonesia OR Philippines)'
+    time_window: "7d"
+    enabled: true
+
+  - id: "agg_consumer_barriers"
+    type: "google_news_rss"
+    mineral_focus: ["ESG", "National Security"]
+    # 靶向欧美中终端市场的 ESG 壁垒、国家安全审查、数据跨境及供应链排他条款
+    query: '("Critical Minerals" OR "Battery Supply Chain") AND (CSDDD OR CSRD OR "FEOC" OR "Inflation Reduction Act" OR "CFIUS" OR "Data Security") AND (US OR EU OR China)'
+    time_window: "7d"
+    enabled: true

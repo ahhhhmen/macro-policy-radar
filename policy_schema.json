@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MacroMineralPolicyExtraction",
+  "type": "object",
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "country": { "type": "string", "description": "政策颁布国家或地区，使用ISO标准二字码，如 CN, ID, ZW, CD" },
+        "mineral_types": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["Lithium", "Cobalt", "Nickel", "Copper", "Rare Earths", "Graphite", "Others"] },
+          "description": "涉及的关键矿产种类"
+        },
+        "policy_source_type": {
+          "type": "string",
+          "enum": ["Official_Gazette", "Ministry_Website", "Customs_Announcement", "Tier1_Commodity_Media"],
+          "description": "信息源头分类"
+        }
+      },
+      "required": ["country", "mineral_types", "policy_source_type"]
+    },
+    "policy_dynamics": {
+      "type": "object",
+      "properties": {
+        "policy_name_zh": { "type": "string", "description": "政策/法案的中文精准翻译名称" },
+        "policy_name_original": { "type": "string", "description": "政策/法案的原语言全称" },
+        "current_stage": {
+          "type": "string",
+          "enum": ["Proposal", "Under_Debate", "Approved_Not_Effective", "Fully_Effective", "Suspended"],
+          "description": "政策所处的最新法律/行政阶段"
+        },
+        "effective_date": { "type": "string", "format": "date", "description": "正式生效日期，若未知则填空" },
+        "core_category": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["Export_Ban", "Resource_Nationalism", "Beneficiation_Mandate", "Tariff_Adjustment", "Foreign_Equity_Restriction", "Tax_Royalties_Change"]
+          },
+          "description": "政策核心手段分类（支持多选）"
+        },
+        "substantive_provisions": { "type": "string", "description": "核心条款的结构化拆解（限300字内，直奔主题，拒绝修饰词）" }
+      },
+      "required": ["policy_name_zh", "current_stage", "core_category", "substantive_provisions"]
+    },
+    "strategic_implications": {
+      "type": "object",
+      "properties": {
+        "supply_chain_impact_level": {
+          "type": "string",
+          "enum": ["High_Disruption", "Moderate_Adjustment", "Low_Monitoring"],
+          "description": "对垂直一体化供应链的潜在冲击烈度评估"
+        },
+        "impact_deduction": {
+          "type": "string",
+          "description": "基于专业顾问视角的深度推演。需包含：1. 对现有海外产能布局的直接波及；2. 对中下游冶炼/前驱体成本的传导效应；3. 替代路线或对策建议。"
+        }
+      },
+      "required": ["supply_chain_impact_level", "impact_deduction"]
+    },
+    "notion_integration": {
+      "type": "object",
+      "properties": {
+        "master_tag": { "type": "string", "const": "宏观地缘与产业政策" },
+        "dingtalk_alert_required": { "type": "boolean", "description": "若冲击烈度为 High_Disruption 且阶段为 Approved/Effective，强制为 true" }
+      },
+      "required": ["master_tag", "dingtalk_alert_required"]
+    }
+  },
+  "required": ["metadata", "policy_dynamics", "strategic_implications", "notion_integration"]
+}

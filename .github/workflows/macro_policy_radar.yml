@@ -28,13 +28,14 @@ jobs:
     - name: Install Architecture Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install openai pyyaml beautifulsoup4 requests lxml
+        pip install -r requirements.txt
 
     # 4. 执行核心研判引擎，并将 GitHub 加密仓库变量安全注入进程环境
     - name: Execute DeepSeek Intelligence Engine
       env:
         OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         OPENAI_BASE_URL: "https://api.deepseek.com"
+        NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
         DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
         NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}

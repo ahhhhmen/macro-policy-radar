@@ -37,6 +37,7 @@ jobs:
         OPENAI_BASE_URL: "https://api.deepseek.com"
         NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
         DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+        DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
         NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
       run: |

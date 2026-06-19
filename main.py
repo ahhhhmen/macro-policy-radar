@@ -1,6 +1,10 @@
 import os
 import json
 import yaml
+import time
+import hmac
+import hashlib
+import base64
 import requests
 import urllib.parse
 import urllib3
@@ -633,12 +637,50 @@ def insert_to_notion(data, source_url):
         return False
 
 
+def _fmt_provisions(text):
+    """将 AI 返回的条款长文本拆解为要点列表，精简信息密度"""
+    if not text:
+        return "> （暂无条款细节）"
+
+    # 尝试按中文分号拆解（AI 最常见输出格式：「1. xxx；2. xxx；3. xxx」）
+    parts = [p.strip() for p in text.split("；") if p.strip()]
+    if len(parts) <= 1:
+        # 尝试按英文分号或换行拆解
+        parts = [p.strip() for p in text.replace(";", "\n").split("\n") if p.strip()]
+
+    if len(parts) <= 1:
+        # 无法拆解，保持原文缩进引用
+        return f"> {text}"
+
+    import re
+    bullets = []
+    for p in parts:
+        # 移除前导编号如 "1." "1、" "(1)" "①"
+        cleaned = re.sub(r'^[\s]*[\(\（]?\d+[\.\、\-\)\）\)]\s*', '', p).strip()
+        if cleaned:
+            bullets.append(f"- {cleaned}")
+    return "\n".join(bullets)
+
+
 def send_dingtalk_alert(data, source_url):
     """【高能时效触达】通过钉钉 Webhook 发送高管宏观视野告警"""
     webhook_url = os.environ.get("DINGTALK_WEBHOOK")
     if not webhook_url or webhook_url == "disabled":
         print("ℹ️ 暂未配置钉钉 Webhook，跳过告警触达阶段。")
         return
+
+    # 加签模式：若配置了 DINGTALK_SECRET，则计算签名并拼接到 URL
+    dingtalk_secret = os.environ.get("DINGTALK_SECRET")
+    if dingtalk_secret:
+        timestamp = str(round(time.time() * 1000))
+        string_to_sign = f"{timestamp}\n{dingtalk_secret}"
+        hmac_code = hmac.new(
+            dingtalk_secret.encode("utf-8"),
+            string_to_sign.encode("utf-8"),
+            digestmod=hashlib.sha256,
+        ).digest()
+        sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+        webhook_url = f"{webhook_url}&timestamp={timestamp}&sign={sign}"
 
     if not data["notion_integration"].get("dingtalk_alert_required", False):
         print("ℹ️ 本条政策未达到钉钉实时告警熔断阈值，已通过防打扰机制过滤。")
@@ -654,27 +696,40 @@ def send_dingtalk_alert(data, source_url):
     dimension_label = pd.get('policy_dimension', '')
     dimension_line = f"\n\n**🏷️ 政策维度**：`{dimension_label}`" if dimension_label else ""
 
+    # 冲击烈度 emoji 映射（替代不生效的 <font> 标签）
+    impact_emoji = {
+        "High_Disruption": "🔴🔴",
+        "Medium_Disruption": "🟡",
+        "Low_Disruption": "🟢",
+    }
+    impact_level = si.get('supply_chain_impact_level', '')
+    impact_badge = f"{impact_emoji.get(impact_level, '⚪')} **{impact_level}**"
+
+    # 条款拆解 → 要点列表（精简信息密度）
+    provisions_raw = pd.get('substantive_provisions', '')
+    provisions_bullets = _fmt_provisions(provisions_raw)
+
     markdown_text = (
-        f"### 🛑 【宏观地缘与产业政策雷达】核心重磅预警\n\n"
+        f"### 📡 宏观政策雷达 · 重磅预警\n\n"
         f"**📌 政策法案**：{pd.get('policy_name_zh') or '(未命名)'} ({pd.get('policy_name_original', '')})\n\n"
-        f"**🌍 影响范围**：国家: `{md['country']}` | 涉及矿种: `{', '.join(md['mineral_types'])}`"
+        f"**🌍 影响范围**：`{md['country']}` ｜ 涉及矿种 `{', '.join(md['mineral_types'])}`"
         f"{dimension_line}\n\n"
-        f"**⚖️ 法律阶段**：`{pd['current_stage']}` (生效日: {pd.get('effective_date') or '未定'})\n\n"
-        f"**🚨 冲击烈度**：<font color='#FF0000'>**{si['supply_chain_impact_level']}**</font>\n\n"
-        f"--- \n\n"
-        f"#### 📜 实质条款拆解：\n"
-        f"> {pd['substantive_provisions']}\n\n"
-        f"#### 🔮 资深顾问研判与纵向供应链成本推演：\n"
-        f"{si['impact_deduction']}\n\n"
-        f"--- \n"
-        f"🔗 [点击此处查看原文来源/溯源检索]({source_url})\n\n"
-        f"*💡 提示：本条目已同步打标存入 Notion 数字化情报资产库。*"
+        f"**⚖️ 法律阶段**：`{pd['current_stage']}` ｜ 生效日 `{pd.get('effective_date') or '未定'}`\n\n"
+        f"**🚨 冲击烈度**：{impact_badge}\n\n"
+        f"━━━━━━━━━━━━━━\n\n"
+        f"#### 📜 实质条款\n\n"
+        f"{provisions_bullets}\n\n"
+        f"#### 🔮 战略研判\n\n"
+        f"{si.get('impact_deduction', '')}\n\n"
+        f"━━━━━━━━━━━━━━\n\n"
+        f"🔗 [查看原文]({source_url})\n\n"
+        f"📋 提示：本条目已同步存入 Notion 数字化情报资产库。"
     )
 
     payload = {
         "msgtype": "markdown",
         "markdown": {
-            "title": f"🚨 重磅地缘政策预警: {md['country']}",
+            "title": f"📡 宏观政策雷达: {md['country']} 重磅预警",
             "text": markdown_text
         }
     }

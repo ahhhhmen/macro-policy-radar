@@ -1,11 +1,15 @@
-version: "3.1"
+version: "3.2"
 
 # =====================================================================
-#  三层寻源架构（v3.1 全量修复版）
-#  第 1 层：静态靶向源 —— 人工精选的官方政府网站，CSS 精准抓取
+#  三层寻源架构（v3.2 中文政策信号增强版）
+#  第 1 层：静态靶向源 —— 人工精选的官方政府网站 + 国家通讯社/党报 RSS
 #  第 2 层：声明式查询矩阵 —— 矿种 × 关键词自动生成全覆盖 NewsAPI 查询
 #  第 3 层：自适应热点发现 —— DeepSeek 每周推荐新兴热点（已启用）
 #
+#  v3.2 更新：
+#    - 从 top-rss-list 新增 5 个中文政策信号源：
+#      新华社、路透中文、人民日报、参考消息、央视新闻
+#    - 第 1 层中文 RSS 源从 3 个扩展到 8 个，实现党报-通讯社-财经媒体全覆盖
 #  v3.1 修复：
 #    - policy_keywords 从 10 个扩展至 25 个，覆盖 DSI/统购统销/供应链尽责/ESG
 #    - 新增中国国务院、商务部静态源，打通中文政策源头
@@ -114,7 +118,7 @@ macro_sources:
     enabled: true
     notes: "英文 RSS 专线：China supply chain due diligence / export control 等补充覆盖"
 
-  # ---- v3.1: top-rss-list 精选中文政策信号源 ----
+	  # ---- v3.2: top-rss-list 精选中文政策信号源（8 源全覆盖）----
   - id: "cn_qstheory"
     country: "CN"
     agency: "求是网"
@@ -131,15 +135,56 @@ macro_sources:
     enabled: true
     notes: "涉外政策权威解读 — 供应链尽责、出口管制等跨境议题深度分析"
 
-  - id: "cn_caixin"
-    country: "CN"
-    agency: "财新网"
-    feed_type: "rss"
-    url: "https://plink.anyfeeder.com/weixin/caixinwang"
-    enabled: true
-    notes: "中国最强财经调查媒体 — 供应链合规、矿产贸易政策深度报道"
+	  - id: "cn_caixin"
+	    country: "CN"
+	    agency: "财新网"
+	    feed_type: "rss"
+	    url: "https://plink.anyfeeder.com/weixin/caixinwang"
+	    enabled: true
+	    notes: "中国最强财经调查媒体 — 供应链合规、矿产贸易政策深度报道"
 
-  - id: "cn_mofcom"
+	  # ---- v3.2: top-rss-list 扩展 —— 国家通讯社 / 党报 / 财经通讯社 ----
+	  - id: "cn_xinhua"
+	    country: "CN"
+	    agency: "新华社"
+	    feed_type: "rss"
+	    url: "https://plink.anyfeeder.com/newscn/whxw"
+	    enabled: true
+	    notes: "国家通讯社 — 国务院令/部委规章/关键矿产目录等政策首发渠道"
+
+	  - id: "cn_reuters_cn"
+	    country: "CN"
+	    agency: "路透中文"
+	    feed_type: "rss"
+	    url: "https://plink.anyfeeder.com/reuters/cn"
+	    enabled: true
+	    notes: "全球大宗商品通讯社 — 矿产贸易/出口管制/DSI 政策深度报道，覆盖印尼/刚果/智利"
+
+	  - id: "cn_peopledaily"
+	    country: "CN"
+	    agency: "人民日报"
+	    feed_type: "rss"
+	    url: "https://plink.anyfeeder.com/people-daily"
+	    enabled: true
+	    notes: "中共中央机关报 — 产业政策方向定调，供应链安全/新质生产力等议题风向标"
+
+	  - id: "cn_cankaoxiaoxi"
+	    country: "CN"
+	    agency: "参考消息"
+	    feed_type: "rss"
+	    url: "https://plink.anyfeeder.com/weixin/ckxxwx"
+	    enabled: true
+	    notes: "外媒编译精选 — 反向推断中国决策层关注的国际政策舆情与应对方向"
+
+	  - id: "cn_cctv"
+	    country: "CN"
+	    agency: "央视新闻"
+	    feed_type: "rss"
+	    url: "https://plink.anyfeeder.com/weixin/cctvnewscenter"
+	    enabled: true
+	    notes: "国家广播电视台 — 国务院常务会议/部委联合发布会等重大政策首播渠道"
+
+	  - id: "cn_mofcom"
     country: "CN"
     agency: "中华人民共和国商务部"
     feed_type: "html"

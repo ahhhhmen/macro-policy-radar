@@ -447,7 +447,7 @@ def _notion_update_policy(page_id, data, source_url):
     }
 
     # 动态注入生效日期
-    effective_date = pd.get("effective_date", "").strip()
+    effective_date = (pd.get("effective_date") or "").strip()
     if effective_date and effective_date.lower() != "null":
         properties["生效日期"] = {"date": {"start": effective_date}}
 
@@ -604,7 +604,7 @@ def insert_to_notion(data, source_url):
         properties["政策维度"] = {"select": {"name": pd["policy_dimension"]}}
 
     # 动态注入生效日期（拦截空值防 Notion 报错）
-    effective_date = pd.get("effective_date", "").strip()
+    effective_date = (pd.get("effective_date") or "").strip()
     if effective_date and effective_date.lower() != "null":
         properties["生效日期"] = {"date": {"start": effective_date}}
 

@@ -23,7 +23,10 @@
     "policy_dynamics": {
       "type": "object",
       "properties": {
-        "policy_name_zh": { "type": "string", "description": "政策/法案的中文精准翻译名称" },
+        "policy_name_zh": {
+          "type": "string",
+          "description": "情报级高管标题。必须采用强结构化公式：【[国家二字码] 核心动作与定量影响：法案核心 (涉及矿种)】。绝不允许只写空泛的名词！正确范例：『[ID] 加征15%出口税与配额收紧：ESDM铜精矿出口新规 (铜/镍)』；错误范例：『印尼出口新规』。"
+        },
         "policy_name_original": { "type": "string", "description": "政策/法案的原语言全称" },
         "current_stage": {
           "type": "string",

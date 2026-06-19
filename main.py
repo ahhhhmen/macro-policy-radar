@@ -328,7 +328,8 @@ _SYSTEM_PROMPT_V31 = (
     "- 对供应链尽责类政策：推演合规成本上升幅度、跨境合规信息穿透风险\n"
     "- 对 DSI/统购统销类政策：推演对矿种出口量的量化影响、替代采购国可行性\n"
     "- 对绿色壁垒类政策：推演碳关税对中下游冶炼成本的传导\n"
-    "- 输出必须具备极高的宏观战略视野。推演必须量化到产能波及与冶炼成本传导。"
+    "- 输出必须具备极高的宏观战略视野。推演必须量化到产能波及与冶炼成本传导。\n\n"
+    "【特别指令：政策名称必须是极具新闻冲击力、高度概括核心动作的『情报简报标题』，让高管不点开正文也能看懂该政策对跨国供应链的具体限制。】"
 )
 
 
@@ -393,7 +394,7 @@ def _notion_search_pages(policy_name_zh, policy_name_original=""):
     if policy_name_zh:
         payload["filter"]["or"].append({
             "property": "政策名称",
-            "title": {"equals": policy_name_zh}
+            "title": {"contains": policy_name_zh}
         })
 
     if policy_name_original:
@@ -473,6 +474,77 @@ def _notion_update_policy(page_id, data, source_url):
         return False
 
 
+# ---- 标题增强：ISO 代码到中文国名映射 ----
+_COUNTRY_ZH_MAP = {
+    "CN": "中国",
+    "ID": "印度尼西亚",
+    "CD": "刚果（金）",
+    "CL": "智利",
+    "AU": "澳大利亚",
+    "EU": "欧盟",
+    "ZW": "津巴布韦",
+    "GLOBAL": "",
+}
+
+# ---- 标题增强：政策阶段枚举到中文标签映射 ----
+_STAGE_ZH_MAP = {
+    "Proposal": "提案阶段",
+    "Under_Debate": "审议中",
+    "Approved_Not_Effective": "已通过待生效",
+    "Fully_Effective": "已生效",
+    "Suspended": "暂停",
+}
+
+# ---- 标题增强：矿种英文到中文映射 ----
+_MINERAL_ZH_MAP = {
+    "Lithium": "锂", "Cobalt": "钴", "Nickel": "镍",
+    "Copper": "铜", "Rare Earths": "稀土", "Graphite": "石墨",
+    "Others": "其他",
+}
+
+
+def _enhance_policy_title(policy_name_zh, country, current_stage, mineral_types=None):
+    """
+    【v3.3 情报级标题增强 — Action-Oriented Intelligence Title】
+    匹配强结构化公式：[{国家码}] {动作+影响}：{法案核心} ({矿种})（{阶段}）
+    - 若标题缺 [国家码] 前缀，自动注入
+    - 若标题缺矿种后缀，自动注入（中文缩写）
+    - 若标题缺阶段，自动注入（兜底）
+    - 若标题已符情报级格式，保持原样
+    """
+    import re
+
+    if not policy_name_zh:
+        return policy_name_zh
+
+    enhanced = policy_name_zh
+
+    # 1. 检测并注入 [{国家码}] 前缀
+    country_tag = f"[{country}]"
+    has_country_tag = bool(re.search(r'\[([A-Z]{2}|EU|GLOBAL)\]', enhanced[:15]))
+    if country and country != "GLOBAL" and not has_country_tag:
+        enhanced = f"{country_tag} {enhanced}"
+
+    # 2. 检测并注入矿种后缀
+    if mineral_types and mineral_types != ["Others"]:
+        minerals_zh = "/".join(_MINERAL_ZH_MAP.get(m, m) for m in mineral_types)
+        # 检测是否已有 (矿种名) 格式的后缀
+        has_mineral_tag = bool(re.search(
+            r'\((?:锂|钴|镍|铜|稀土|石墨|Lithium|Cobalt|Nickel|Copper|Rare\s*Earths?|Graphite)',
+            enhanced
+        ))
+        if not has_mineral_tag:
+            enhanced = f"{enhanced} ({minerals_zh})"
+
+    # 3. 检测并注入阶段后缀（兜底 — AI 应在标题中体现动作而非阶段，但保留此安全网）
+    stage_zh = _STAGE_ZH_MAP.get(current_stage, "")
+    has_stage = any(label in enhanced for label in _STAGE_ZH_MAP.values())
+    if stage_zh and not has_stage:
+        enhanced = f"{enhanced}（{stage_zh}）"
+
+    return enhanced
+
+
 def insert_to_notion(data, source_url):
     """
     【持久化沉淀 v3.1】将结构化情报写入 Notion 数据库。
@@ -492,10 +564,18 @@ def insert_to_notion(data, source_url):
     policy_name_zh = pd.get("policy_name_zh", "")
     policy_name_original = pd.get("policy_name_original", "")
 
-    # ---- v3.1: 去重检查 ----
+    # ---- v3.1: 去重检查（使用原始标题，确保与旧记录兼容）----
     exists, existing_page_id = _notion_search_pages(policy_name_zh, policy_name_original)
     if exists and existing_page_id:
         return _notion_update_policy(existing_page_id, data, source_url)
+
+    # ---- v3.3: 情报级标题增强（仅用于 Notion 展示，不参与去重）----
+    enhanced_title = _enhance_policy_title(
+        policy_name_zh,
+        md.get("country", ""),
+        pd.get("current_stage", ""),
+        md.get("mineral_types", []),
+    )
 
     # ---- 新建记录 ----
     url = "https://api.notion.com/v1/pages"
@@ -506,7 +586,7 @@ def insert_to_notion(data, source_url):
     }
 
     properties = {
-        "政策名称":     {"title":       [{"text": {"content": policy_name_zh}}]},
+        "政策名称":     {"title":       [{"text": {"content": enhanced_title}}]},
         "原名及出处":   {"rich_text":   [{"text": {"content": policy_name_original}}]},
         "核心分类":     {"select":      {"name": data["notion_integration"]["master_tag"]}},
         "颁布国家":     {"select":      {"name": md["country"]}},

@@ -20,6 +20,12 @@ load_dotenv()
 NEWSAPI_LANGUAGES = os.environ.get("NEWSAPI_LANGUAGES", "en").split(",")
 # v3.1: 每语言最大返回文章数
 NEWSAPI_PAGE_SIZE = int(os.environ.get("NEWSAPI_PAGE_SIZE", "5"))
+# v3.3 熔断机制：单轮最大 AI 调用次数（控制成本，0=不限）
+MAX_AI_CALLS = int(os.environ.get("MAX_AI_CALLS", "8"))
+# v3.3 熔断：连续空转上限，达到后跳过后续同 feed_type 源
+MAX_CONSECUTIVE_EMPTY = int(os.environ.get("MAX_CONSECUTIVE_EMPTY", "5"))
+# v3.3 预筛选：文本最短字符数（低于此值跳过 AI，节省 token）
+MIN_TEXT_LENGTH = int(os.environ.get("MIN_TEXT_LENGTH", "300"))
 # v3.1: RSS 兜底覆盖的语言（Google News 支持多语言，不受 API 频率限制）
 RSS_FALLBACK_LANGUAGES = os.environ.get("RSS_FALLBACK_LANGUAGES", "en,zh,id").split(",")
 
@@ -44,7 +50,7 @@ def load_all_sources(yaml_path):
         days_back = 7
         if matrix_config:
             days_back = matrix_config.get("days_back", 7)
-            for mq in generate_queries_from_matrix(matrix_config, max_keywords_per_query=13):
+            for mq in generate_queries_from_matrix(matrix_config, max_keywords_per_query=25):
                 sources.append({
                     "id": mq["id"],
                     "country": "GLOBAL",
@@ -349,7 +355,8 @@ def extract_macro_policy(raw_text, schema_dict):
                 {"role": "user", "content": f"请对以下原生文本进行过滤与地缘战略推演：\n\n{raw_text}"}
             ],
             response_format={"type": "json_object"},
-            temperature=0.2
+            temperature=0.2,
+            timeout=60,  # v3.3 熔断：单次 AI 调用超时 60s
         )
         content = response.choices[0].message.content
         if content is None:
@@ -693,11 +700,21 @@ if __name__ == "__main__":
 
     print(f"📡 数字化情报网络就绪。当前天网总线共挂载 {len(all_active_sources)} 个探测节点。")
     print(f"🌐 NewsAPI: {', '.join(NEWSAPI_LANGUAGES)} | RSS 兜底: {', '.join(RSS_FALLBACK_LANGUAGES)}")
+    print(f"🛡️ 熔断配置: 最大AI调用={MAX_AI_CALLS} | 连续空转上限={MAX_CONSECUTIVE_EMPTY} | 最小文本长度={MIN_TEXT_LENGTH}")
+
+    ai_call_count = 0
+    consecutive_empty = 0
+    last_empty_feed_type = None
 
     for source in all_active_sources:
         source_notes = source.get("notes", "")
         notes_suffix = f" [📝 {source_notes}]" if source_notes else ""
         print(f"\n🚀 [正在扫描] 目标：{source['agency']} ({source['country']}){notes_suffix}...")
+
+        # ---- v3.3 熔断：连续空转检测 ----
+        if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
+            print(f"🛑 [熔断] 连续 {consecutive_empty} 个节点无有效政策，跳过后续 node。")
+            break
 
         source_url = source.get("url", "")
 
@@ -713,33 +730,54 @@ if __name__ == "__main__":
         else:
             fetched_text = fetch_and_clean_html(source["url"], source["dom_selector"])
 
-        if fetched_text and len(fetched_text) > 100:
-            print(f"📥 [成功捕获] 原始线索已入流 ({len(fetched_text)} 字符)。正在调动 DeepSeek 进行矩阵式交叉研判...")
-            analysis_result = extract_macro_policy(fetched_text, schema)
-
-            if analysis_result:
-                # v3.1: 校验 DeepSeek 返回的 JSON 是否包含所有必需字段，防止 KeyError 崩溃
-                required_keys = ["metadata", "policy_dynamics", "strategic_implications", "notion_integration"]
-                missing = [k for k in required_keys if k not in analysis_result]
-                if missing:
-                    print(f"⚠️ DeepSeek 返回 JSON 缺少关键字段: {missing}，跳过本条。")
-                    continue
-
-                # v3.1: 噪音过滤 — 跳过 DeepSeek 返回的"无政策"结果
-                pd = analysis_result.get("policy_dynamics", {})
-                name_zh = pd.get("policy_name_zh") or ""
-                noise_patterns = ["无相关", "无关键矿产", "无宏观", "无相关政策", "无重大政策",
-                                  "无实质性", "未发现", "暂无", "未检测到", "无有效政策",
-                                  "无有效信息", "无效政策"]
-                if any(p in name_zh for p in noise_patterns):
-                    print(f"ℹ️ DeepSeek 判定为无宏观政策（{name_zh}），已过滤。")
-                    continue
-
-                print(f"🎉 战略情报研判完成。开始启动终端合流分流流控...")
-                insert_to_notion(analysis_result, source_url)
-                send_dingtalk_alert(analysis_result, source_url)
-        else:
+        if not fetched_text or len(fetched_text) < MIN_TEXT_LENGTH:
             if fetched_text is None:
                 print(f"ℹ️ 该节点未捕获到有效内容（网络超时或选择器无匹配）。")
             else:
-                print(f"ℹ️ 该节点在当前窗口期内未发现符合布尔条件的宏观政策变动。")
+                print(f"ℹ️ 该节点内容过短（{len(fetched_text)} 字符），跳过 AI 调用。")
+
+            # 连续空转计数
+            ft = source.get("feed_type", "")
+            if ft == last_empty_feed_type:
+                consecutive_empty += 1
+            else:
+                consecutive_empty = 1
+                last_empty_feed_type = ft
+            continue
+
+        # ---- v3.3 熔断：AI 调用次数上限 ----
+        if MAX_AI_CALLS > 0 and ai_call_count >= MAX_AI_CALLS:
+            print(f"🛑 [熔断] 已达本轮 AI 调用上限 ({MAX_AI_CALLS})，跳过后续分析与入库。")
+            break
+
+        print(f"📥 [成功捕获] 原始线索已入流 ({len(fetched_text)} 字符)。正在调动 DeepSeek 进行矩阵式交叉研判...")
+        analysis_result = extract_macro_policy(fetched_text, schema)
+        ai_call_count += 1
+
+        if analysis_result:
+            # v3.1: 校验 DeepSeek 返回的 JSON 是否包含所有必需字段，防止 KeyError 崩溃
+            required_keys = ["metadata", "policy_dynamics", "strategic_implications", "notion_integration"]
+            missing = [k for k in required_keys if k not in analysis_result]
+            if missing:
+                print(f"⚠️ DeepSeek 返回 JSON 缺少关键字段: {missing}，跳过本条。")
+                consecutive_empty += 1
+                continue
+
+            # v3.1: 噪音过滤 — 跳过 DeepSeek 返回的"无政策"结果
+            pd = analysis_result.get("policy_dynamics", {})
+            name_zh = pd.get("policy_name_zh") or ""
+            noise_patterns = ["无相关", "无关键矿产", "无宏观", "无相关政策", "无重大政策",
+                              "无实质性", "未发现", "暂无", "未检测到", "无有效政策",
+                              "无有效信息", "无效政策"]
+            if any(p in name_zh for p in noise_patterns):
+                print(f"ℹ️ DeepSeek 判定为无宏观政策（{name_zh}），已过滤。")
+                consecutive_empty += 1
+                continue
+
+            # 有效政策 → 重置空转计数
+            consecutive_empty = 0
+            last_empty_feed_type = None
+
+            print(f"🎉 战略情报研判完成。开始启动终端合流分流流控...")
+            insert_to_notion(analysis_result, source_url)
+            send_dingtalk_alert(analysis_result, source_url)

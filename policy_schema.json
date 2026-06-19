@@ -6,7 +6,7 @@
     "metadata": {
       "type": "object",
       "properties": {
-        "country": { "type": "string", "description": "政策颁布国家或地区，使用ISO标准二字码，如 CN, ID, ZW, CD" },
+        "country": { "type": "string", "description": "政策颁布国家或地区，使用ISO标准二字码，如 CN, ID, ZW, CD, EU" },
         "mineral_types": {
           "type": "array",
           "items": { "type": "string", "enum": ["Lithium", "Cobalt", "Nickel", "Copper", "Rare Earths", "Graphite", "Others"] },
@@ -31,17 +31,45 @@
           "description": "政策所处的最新法律/行政阶段"
         },
         "effective_date": { "type": "string", "format": "date", "description": "正式生效日期，若未知则填空" },
+        "policy_dimension": {
+          "type": "string",
+          "enum": [
+            "Trade_Restriction",
+            "Resource_Sovereignty",
+            "Supply_Chain_Governance",
+            "ESG_Compliance",
+            "Industrial_Policy",
+            "Green_Transition"
+          ],
+          "description": "政策的一级维度分类（兜底维度标签）"
+        },
         "core_category": {
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["Export_Ban", "Resource_Nationalism", "Beneficiation_Mandate", "Tariff_Adjustment", "Foreign_Equity_Restriction", "Tax_Royalties_Change"]
+            "enum": [
+              "Export_Ban",
+              "Export_Restriction",
+              "Resource_Nationalism",
+              "Beneficiation_Mandate",
+              "Tariff_Adjustment",
+              "Foreign_Equity_Restriction",
+              "Tax_Royalties_Change",
+              "Supply_Chain_Due_Diligence",
+              "State_Procurement_Monopoly",
+              "ESG_Compliance_Mandate",
+              "Strategic_Stockpile",
+              "Price_Control_Subsidy",
+              "Carbon_Border_Mechanism",
+              "Critical_Minerals_Strategy",
+              "Green_Subsidy_IRA"
+            ]
           },
           "description": "政策核心手段分类（支持多选）"
         },
         "substantive_provisions": { "type": "string", "description": "核心条款的结构化拆解（限300字内，直奔主题，拒绝修饰词）" }
       },
-      "required": ["policy_name_zh", "current_stage", "core_category", "substantive_provisions"]
+      "required": ["policy_name_zh", "current_stage", "policy_dimension", "core_category", "substantive_provisions"]
     },
     "strategic_implications": {
       "type": "object",
@@ -53,7 +81,7 @@
         },
         "impact_deduction": {
           "type": "string",
-          "description": "基于专业顾问视角的深度推演。需包含：1. 对现有海外产能布局的直接波及；2. 对中下游冶炼/前驱体成本的传导效应；3. 替代路线或对策建议。"
+          "description": "基于专业顾问视角的深度推演。需包含：1. 对现有海外产能布局的直接波及；2. 对中下游冶炼/前驱体成本的传导效应；3. 替代路线或对策建议。对于 ESG/供应链尽责类政策，需额外推演合规成本与跨境合规风险。"
         }
       },
       "required": ["supply_chain_impact_level", "impact_deduction"]

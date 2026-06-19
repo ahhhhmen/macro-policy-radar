@@ -1,13 +1,19 @@
-version: "3.0"
+version: "3.1"
 
 # =====================================================================
-#  三层寻源架构
+#  三层寻源架构（v3.1 全量修复版）
 #  第 1 层：静态靶向源 —— 人工精选的官方政府网站，CSS 精准抓取
 #  第 2 层：声明式查询矩阵 —— 矿种 × 关键词自动生成全覆盖 NewsAPI 查询
-#  第 3 层：自适应热点发现 —— DeepSeek 每周推荐新兴热点（可选开关）
+#  第 3 层：自适应热点发现 —— DeepSeek 每周推荐新兴热点（已启用）
+#
+#  v3.1 修复：
+#    - policy_keywords 从 10 个扩展至 25 个，覆盖 DSI/统购统销/供应链尽责/ESG
+#    - 新增中国国务院、商务部静态源，打通中文政策源头
+#    - 新增印尼贸易部（Kemendag）静态源，覆盖 DSI 政策源头
+#    - 启用自适应热点发现（B 方案），每周捕获新兴政策动态
 # =====================================================================
 
-# ---- 第 2 层：声明式查询矩阵（方案 A — 替代手写 dynamic_aggregators）----
+# ---- 第 2 层：声明式查询矩阵（方案 A）----
 query_matrix:
   minerals:
     - Lithium
@@ -17,6 +23,7 @@ query_matrix:
     - "Rare Earths"
     - Graphite
   policy_keywords:
+    # 传统贸易壁垒类（保留）
     - "Export Ban"
     - "Export Restriction"
     - Tariff
@@ -27,15 +34,34 @@ query_matrix:
     - Nationalization
     - "Foreign Equity"
     - "Resource Nationalism"
+    # 国家统购/供应义务类（新增 — 覆盖印尼 DSI 等政策）
+    - "Domestic Supply Obligation"
+    - "State Procurement"
+    - "Mandatory Offtake"
+    - "Price Control"
+    - "Strategic Stockpile"
+    - "Supply Nationalization"
+    - "Bulk Purchasing"
+    # 供应链合规/尽责类（新增 — 覆盖中国 834/835 号法案等）
+    - "Supply Chain Due Diligence"
+    - "ESG Regulation"
+    - "Forced Labor Prevention"
+    - "Carbon Border Adjustment"
+    - "Cross-Border Compliance"
+    # 绿色壁垒/新兴产业政策（前瞻覆盖）
+    - "Critical Minerals Strategy"
+    - "Green Subsidy"
+    - "IRA"
   days_back: 7
 
-# ---- 第 3 层：自适应热点发现（方案 B — 可选开关）----
+# ---- 第 3 层：自适应热点发现（方案 B — 已启用）----
 adaptive_discovery:
-  enabled: false      # 设为 true 开启：每次运行额外调用 DeepSeek 生成当周热点查询
+  enabled: true       # v3.1: 开启，每周借助 DeepSeek 生成当周前沿查询
   max_hotspots: 5     # 每次最多补充 N 条动态查询
 
 # ---- 第 1 层：静态靶向源（官方网页，一锤定音）----
 macro_sources:
+  # ---- 印尼 ----
   - id: "id_esdm_news"
     country: "ID"
     agency: "印尼能源与矿产资源部"
@@ -43,3 +69,130 @@ macro_sources:
     url: "https://www.esdm.go.id/en/media-center/news-archives"
     dom_selector: "section:not(#running-news)"
     enabled: true
+
+  - id: "id_kemendag"
+    country: "ID"
+    agency: "印尼贸易部 (Kemendag)"
+    feed_type: "html"
+    url: "https://www.kemendag.go.id/berita"
+    dom_selector: "div.news-list, article"
+    enabled: true
+    notes: "DSI 统购统销政策的核心发布渠道"
+
+  - id: "id_maritim"
+    country: "ID"
+    agency: "印尼海洋与投资统筹部"
+    feed_type: "html"
+    url: "https://maritim.go.id/"
+    dom_selector: "div.post-content, article"
+    enabled: true
+    notes: "印尼矿产下游化（Hilirisasi）与投资政策统筹机构"
+
+  # ---- 中国 ----
+  - id: "cn_state_council"
+    country: "CN"
+    agency: "中华人民共和国国务院"
+    feed_type: "html"
+    url: "https://www.gov.cn/zhengce/zuixin/home.htm"
+    dom_selector: "div.news_box, ul.listTxt, li.listTxt, div.list, div.content, div.page-content"
+    enabled: false
+    notes: "⚠️ 全站 JS 渲染，已禁用。改用下方 RSS 管道覆盖。"
+
+  - id: "cn_policy_rss_zh"
+    country: "CN"
+    agency: "中国宏观政策-RSS中文专线"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=中国+供应链尽责+出口管制+关键矿产+产业政策&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+    enabled: true
+    notes: "中文 RSS 专线：覆盖国务院 834/835 号、出口管制、供应链尽责等政策"
+
+  - id: "cn_policy_rss_en"
+    country: "CN"
+    agency: "中国宏观政策-RSS英文专线"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=China+supply+chain+due+diligence+export+control+critical+minerals+policy&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+    notes: "英文 RSS 专线：China supply chain due diligence / export control 等补充覆盖"
+
+  # ---- v3.1: top-rss-list 精选中文政策信号源 ----
+  - id: "cn_qstheory"
+    country: "CN"
+    agency: "求是网"
+    feed_type: "rss"
+    url: "https://plink.anyfeeder.com/qstheory"
+    enabled: true
+    notes: "中共中央机关刊 — 重大政策理论前置信号，834/835 号等国务院法令风向标"
+
+  - id: "cn_xiake_island"
+    country: "CN"
+    agency: "侠客岛 (人民日报海外版)"
+    feed_type: "rss"
+    url: "https://plink.anyfeeder.com/weixin/xiake_island"
+    enabled: true
+    notes: "涉外政策权威解读 — 供应链尽责、出口管制等跨境议题深度分析"
+
+  - id: "cn_caixin"
+    country: "CN"
+    agency: "财新网"
+    feed_type: "rss"
+    url: "https://plink.anyfeeder.com/weixin/caixinwang"
+    enabled: true
+    notes: "中国最强财经调查媒体 — 供应链合规、矿产贸易政策深度报道"
+
+  - id: "cn_mofcom"
+    country: "CN"
+    agency: "中华人民共和国商务部"
+    feed_type: "html"
+    url: "https://www.mofcom.gov.cn/xwfbh/"
+    dom_selector: "div.article, div.main, div.content, ul.list, div.news-list"
+    enabled: true
+    notes: "商务部新闻发布（对外投资/供应链合规政策发布渠道）"
+
+  - id: "cn_ndrc"
+    country: "CN"
+    agency: "国家发展和改革委员会"
+    feed_type: "html"
+    url: "https://www.ndrc.gov.cn/xwdt/"
+    dom_selector: "div.article, div.main, ul.u-list"
+    enabled: true
+    notes: "中国产业政策、外商投资准入、关键矿产目录的主管部门"
+
+  # ---- 刚果（金）----
+  - id: "cd_mines"
+    country: "CD"
+    agency: "刚果（金）矿业部"
+    feed_type: "html"
+    url: "https://mines.gouv.cd/category/actualites/"
+    dom_selector: "div.post-content, article"
+    enabled: true
+    notes: "钴矿出口配额/审查政策的核心发布渠道"
+
+  # ---- 智利 ----
+  - id: "cl_minmineria"
+    country: "CL"
+    agency: "智利矿业部 (Ministerio de Minería)"
+    feed_type: "html"
+    url: "https://www.minmineria.cl/category/noticias/"
+    dom_selector: "div.content, article"
+    enabled: true
+    notes: "锂矿国有化/盐湖招标政策的核心发布渠道"
+
+  # ---- 澳大利亚 ----
+  - id: "au_industry"
+    country: "AU"
+    agency: "澳大利亚工业、科学与资源部"
+    feed_type: "html"
+    url: "https://www.industry.gov.au/news"
+    dom_selector: "article, div.article, div.view-content"
+    enabled: true
+    notes: "关键矿产战略、FIRB 外资审查政策发布渠道"
+
+  # ---- 欧盟 ----
+  - id: "eu_commission"
+    country: "EU"
+    agency: "欧盟委员会 (European Commission)"
+    feed_type: "html"
+    url: "https://ec.europa.eu/commission/presscorner/home/en"
+    dom_selector: "body"
+    enabled: true
+    notes: "EU Critical Raw Materials Act / CBAM 碳边境调节等政策来源"

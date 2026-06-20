@@ -99,9 +99,9 @@ macro-policy-radar/
           │  └──────────────────────┘    │
           │  ┌──────────────────────┐    │
           │  │ send_dingtalk_alert()│    │
-          │  │ → 钉钉高管群即时触达  │    │
-          │  │  (仅高冲击 + 已生效   │    │
-          │  │   才触发告警)         │    │
+	          │  │ → 钉钉高管群即时触达  │    │
+	          │  │  (High+Medium 级别     │    │
+	          │  │   才触发告警)         │    │
           │  └──────────────────────┘    │
           └──────────────────────────────┘
 ```
@@ -143,7 +143,7 @@ macro-policy-radar/
 | `notion_integration` | 分发控制 | `master_tag` (固定值"宏观地缘与产业政策"), `dingtalk_alert_required` (熔断开关) |
 
 **Schema 设计约束**：
-- `dingtalk_alert_required` 由 AI 判定：当冲击烈度为 `High_Disruption` 且法律阶段为已批准/已生效时强制为 `true`
+- `dingtalk_alert_required` 由 AI 判定：当冲击烈度为 `High_Disruption` 或 `Moderate_Adjustment` 时强制为 `true`；`Low_Monitoring` 强制为 `false`
 - `master_tag` 使用 `const` 固化，确保所有入库条目打上统一标签
 - `core_category` 支持多选，覆盖出口禁令、资源民族主义、选矿强制令等 6 类政策工具
 
@@ -209,7 +209,7 @@ main() ▸ if __name__ == "__main__"
 
 5. **门控阈值（100 字符）**：过滤空页面或几乎无内容的响应，避免浪费 AI 调用。
 
-6. **钉钉熔断机制**：不是所有政策都推送告警，只有 AI 判定为高冲击+已生效的才触发钉钉通知，实现"防打扰"。
+6. **钉钉熔断机制**：不是所有政策都推送告警，只有 AI 判定为 High_Disruption 或 Moderate_Adjustment 级别的才触发钉钉通知，Low_Monitoring 被静默过滤，实现"防打扰"。Python 端双重保障：同时检查 AI 的 `dingtalk_alert_required` 标记和 `supply_chain_impact_level` 枚举值。
 
 ---
 

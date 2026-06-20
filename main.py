@@ -682,8 +682,13 @@ def send_dingtalk_alert(data, source_url):
         sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
         webhook_url = f"{webhook_url}&timestamp={timestamp}&sign={sign}"
 
-    if not data["notion_integration"].get("dingtalk_alert_required", False):
-        print("ℹ️ 本条政策未达到钉钉实时告警熔断阈值，已通过防打扰机制过滤。")
+    impact = data["strategic_implications"].get("supply_chain_impact_level", "")
+    alert_required = data["notion_integration"].get("dingtalk_alert_required", False)
+
+    # 双重保障：AI 判定 + 烈度级别直接判断
+    # High_Disruption / Moderate_Adjustment 推送，Low_Monitoring 静默过滤
+    if not alert_required and impact not in ("High_Disruption", "Moderate_Adjustment"):
+        print("ℹ️ 本条政策未达到钉钉实时告警阈值（Low_Monitoring），已通过防打扰机制过滤。")
         return
 
     headers = {"Content-Type": "application/json"}
@@ -699,8 +704,8 @@ def send_dingtalk_alert(data, source_url):
     # 冲击烈度 emoji 映射（替代不生效的 <font> 标签）
     impact_emoji = {
         "High_Disruption": "🔴🔴",
-        "Medium_Disruption": "🟡",
-        "Low_Disruption": "🟢",
+        "Moderate_Adjustment": "🟡",
+        "Low_Monitoring": "🟢",
     }
     impact_level = si.get('supply_chain_impact_level', '')
     impact_badge = f"{impact_emoji.get(impact_level, '⚪')} **{impact_level}**"

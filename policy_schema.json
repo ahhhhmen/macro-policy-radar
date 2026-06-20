@@ -93,7 +93,7 @@
       "type": "object",
       "properties": {
         "master_tag": { "type": "string", "const": "宏观地缘与产业政策" },
-        "dingtalk_alert_required": { "type": "boolean", "description": "若冲击烈度为 High_Disruption 且阶段为 Approved/Effective，强制为 true" }
+        "dingtalk_alert_required": { "type": "boolean", "description": "若冲击烈度为 High_Disruption 或 Moderate_Adjustment，强制为 true；Low_Monitoring 强制为 false" }
       },
       "required": ["master_tag", "dingtalk_alert_required"]
     }

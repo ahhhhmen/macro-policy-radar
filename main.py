@@ -32,6 +32,8 @@ MAX_CONSECUTIVE_EMPTY = int(os.environ.get("MAX_CONSECUTIVE_EMPTY", "5"))
 MIN_TEXT_LENGTH = int(os.environ.get("MIN_TEXT_LENGTH", "300"))
 # v3.1: RSS 兜底覆盖的语言（Google News 支持多语言，不受 API 频率限制）
 RSS_FALLBACK_LANGUAGES = os.environ.get("RSS_FALLBACK_LANGUAGES", "en,zh,id").split(",")
+# v3.5: RSS 文章发布日期硬过滤窗口（天）—— 超过此天数的旧文直接丢弃
+RSS_MAX_AGE_DAYS = int(os.environ.get("RSS_MAX_AGE_DAYS", "14"))
 
 def load_schema(schema_path):
     """加载认知滤网 Schema"""
@@ -98,8 +100,60 @@ def fetch_and_clean_html(url, selector):
         print(f"⚠️ HTML 抓取失败 [{url[:50]}...]: {str(e)[:100]}")
         return None
 
+def _parse_rss_date(pub_date_str):
+    """解析 RSS <pubDate>（RFC 822 格式），返回 timezone-aware datetime；失败返回 None"""
+    if not pub_date_str:
+        return None
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(pub_date_str.strip())
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _is_within_age(pub_date_str, max_days=RSS_MAX_AGE_DAYS):
+    """
+    判断 RSS 文章发布日期是否在 max_days 天内。
+    日期为空或解析失败时保守放行（返回 True），避免误杀无 pubDate 的优质源。
+    """
+    if not pub_date_str:
+        return True
+    dt = _parse_rss_date(pub_date_str)
+    if dt is None:
+        return True
+    age = datetime.now(timezone.utc) - dt
+    return age <= timedelta(days=max_days)
+
+
+def resolve_google_news_url(google_url):
+    """
+    解码 Google News 跳转链（news.google.com/rss/articles/...），跟随重定向拿到真实源 URL。
+    非 Google News 链接或解码失败时原样返回，保证不 worse than before。
+    """
+    if not google_url or "news.google.com" not in google_url:
+        return google_url
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        res = requests.get(google_url, headers=headers, timeout=10,
+                           allow_redirects=True, verify=False)
+        final_url = res.url
+        if final_url and "news.google.com" not in final_url and final_url.startswith("http"):
+            return final_url
+        return google_url
+    except Exception as e:
+        print(f"⚠️ Google News 链接解码失败 [{google_url[:60]}...]: {str(e)[:80]}")
+        return google_url
+
+
 def fetch_and_parse_rss(url, limit=3):
-    """【RSS 轨道】通用 XML 解析引擎"""
+    """
+    【RSS 轨道】通用 XML 解析引擎
+    v3.4: 提取每条 item 的原文链接
+    v3.5: 解析 <pubDate> 做发布日期硬过滤（超 RSS_MAX_AGE_DAYS 丢弃）+ Google News 链接解码
+    """
     headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
     try:
         response = requests.get(url, headers=headers, timeout=15)
@@ -108,16 +162,42 @@ def fetch_and_parse_rss(url, limit=3):
         items = soup.find_all('item')
         if not items: return None
         combined_policies = []
+        links = []
+        skipped_old = 0
         for idx, item in enumerate(items[:limit]):
             title = item.find('title').get_text(strip=True) if item.find('title') else "Untitled"
             desc_node = item.find('description') or item.find('summary')
             raw_desc = desc_node.get_text(strip=True) if desc_node else ""
             clean_desc = BeautifulSoup(raw_desc, 'html.parser').get_text(separator=" ", strip=True)
-            combined_policies.append(f"--- [情报线索 #{idx+1}] ---\n标题: {title}\n详情摘要: {clean_desc}")
-        return "\n\n".join(combined_policies)
+
+            # v3.5: 发布日期硬过滤 —— 超 RSS_MAX_AGE_DAYS 的旧文直接丢弃
+            pub_node = item.find('pubDate') or item.find('published') or item.find('{http://purl.org/dc/elements/1.1/}date')
+            pub_date_str = pub_node.get_text(strip=True) if pub_node else ""
+            if not _is_within_age(pub_date_str):
+                skipped_old += 1
+                continue
+
+            # v3.4: 提取原文链接；v3.5: Google News 跳转链解码
+            item_link = ""
+            link_node = item.find('link')
+            if link_node:
+                item_link = link_node.get_text(strip=True)
+                if item_link:
+                    item_link = resolve_google_news_url(item_link)
+                    links.append(item_link)
+            pub_line = f"\n发布日期: {pub_date_str}" if pub_date_str else ""
+            link_line = f"\n原文链接: {item_link}" if item_link else ""
+            combined_policies.append(f"--- [情报线索 #{idx+1}] ---\n标题: {title}\n详情摘要: {clean_desc}{pub_line}{link_line}")
+        if skipped_old:
+            print(f"   ⏰ [RSS] 过滤 {skipped_old} 条超过 {RSS_MAX_AGE_DAYS} 天的旧文。")
+        if not combined_policies:
+            print(f"   ⏰ [RSS] 本源全部 item 超过 {RSS_MAX_AGE_DAYS} 天，整源跳过。")
+            return None
+        return {"text": "\n\n".join(combined_policies), "links": links}
     except Exception as e:
         print(f"⚠️ RSS 接口请求失败: {str(e)}")
         return None
+
 
 
 # =============================================================================
@@ -154,7 +234,7 @@ def _fetch_newsapi_single_lang(query, days_back, lang, api_key):
             title = art.get("title", "Untitled")
             desc = art.get("description", "") or ""
             if idx == 0:
-                first_url = art.get("url", "")
+                first_url = resolve_google_news_url(art.get("url", ""))
             combined.append(f"--- [线索 #{idx+1} | lang={lang}] ---\n标题: {title}\n摘要: {desc}")
         return {"text": "\n\n".join(combined), "source_url": first_url, "language": lang}
     except Exception as e:
@@ -169,9 +249,11 @@ def _fetch_google_rss_fallback(query, days_back, lang):
     hl, gl = hl_gl.split("-") if "-" in hl_gl else (hl_gl, "US")
     encoded = urllib.parse.quote(f"{query} when:{days_back}d")
     rss_url = f"https://news.google.com/rss/search?q={encoded}&hl={hl}-{gl}&gl={gl}&ceid={gl}:{hl}"
-    rss_text = fetch_and_parse_rss(rss_url, limit=3)
-    if rss_text:
-        return {"text": rss_text, "source_url": rss_url, "language": lang}
+    rss_result = fetch_and_parse_rss(rss_url, limit=3)
+    if rss_result:
+        # v3.4: 优先使用 RSS item 中提取的原文链接，fallback 到 RSS 订阅地址
+        best_url = rss_result["links"][0] if rss_result.get("links") else rss_url
+        return {"text": rss_result["text"], "source_url": best_url, "language": lang}
     return None
 
 
@@ -514,11 +596,58 @@ _MINERAL_ZH_MAP = {
 }
 
 
-def _enhance_policy_title(policy_name_zh, country, current_stage, mineral_types=None):
+# ---- 推送显示：国家代码 → 国旗 + 中文名 ----
+_COUNTRY_DISPLAY = {
+    "CN": "🇨🇳 中国", "ID": "🇮🇩 印尼", "EU": "🇪🇺 欧盟",
+    "CD": "🇨🇩 刚果(金)", "CL": "🇨🇱 智利", "AU": "🇦🇺 澳大利亚",
+    "US": "🇺🇸 美国", "JP": "🇯🇵 日本", "KR": "🇰🇷 韩国",
+    "GLOBAL": "🌐 全球",
+}
+
+# ---- 推送显示：冲击烈度 → 中文 ----
+_IMPACT_ZH_MAP = {
+    "High_Disruption": "重大冲击",
+    "Moderate_Adjustment": "中度调整",
+    "Low_Monitoring": "低度监测",
+}
+
+# ---- 推送显示：政策维度 → 中文 ----
+_DIMENSION_ZH_MAP = {
+    "Trade_Restriction": "贸易限制",
+    "Resource_Sovereignty": "资源主权",
+    "Supply_Chain_Governance": "供应链治理",
+    "ESG_Compliance": "ESG合规",
+    "Industrial_Policy": "产业政策",
+    "Green_Transition": "绿色转型",
+}
+
+
+# ---- 推送格式化辅助函数（避免 send_dingtalk_alert / send_dingtalk_digest 重复代码）----
+
+def _fmt_country(code):
+    return _COUNTRY_DISPLAY.get(code, code)
+
+def _fmt_impact(level):
+    return _IMPACT_ZH_MAP.get(level, level)
+
+def _fmt_stage(stage):
+    return _STAGE_ZH_MAP.get(stage, stage)
+
+def _fmt_minerals(types):
+    if not types:
+        return "—"
+    return "、".join(_MINERAL_ZH_MAP.get(m, m) for m in types)
+
+def _fmt_dimension(dim):
+    return _DIMENSION_ZH_MAP.get(dim, dim)
+
+
+def _enhance_policy_title(policy_name_zh, country, current_stage, mineral_types=None, issuing_authority=""):
     """
     【v3.3 情报级标题增强 — Action-Oriented Intelligence Title】
-    匹配强结构化公式：[{国家码}] {动作+影响}：{法案核心} ({矿种})（{阶段}）
+    匹配强结构化公式：[{国家码}] {颁布主体}{动作+影响}：{法案核心} ({矿种})（{阶段}）
     - 若标题缺 [国家码] 前缀，自动注入
+    - v3.5: 若标题缺颁布主体（[国家码] 后紧接动词），自动注入 issuing_authority
     - 若标题缺矿种后缀，自动注入（中文缩写）
     - 若标题缺阶段，自动注入（兜底）
     - 若标题已符情报级格式，保持原样
@@ -535,6 +664,16 @@ def _enhance_policy_title(policy_name_zh, country, current_stage, mineral_types=
     has_country_tag = bool(re.search(r'\[([A-Z]{2}|EU|GLOBAL)\]', enhanced[:15]))
     if country and country != "GLOBAL" and not has_country_tag:
         enhanced = f"{country_tag} {enhanced}"
+        has_country_tag = True
+
+    # v3.5: 检测并注入颁布主体 —— [国家码] 之后若紧接动词（推动/加征/通过/禁止…），说明缺主体
+    if issuing_authority and has_country_tag:
+        m = re.match(r'^(\[[A-Z]{2}|EU|GLOBAL\]\s*)([\u4e00-\u9fa5])', enhanced)
+        if m:
+            after_tag = m.group(2)
+            _ACTION_VERBS = "推动加征通过禁止发布出台征收实施签署批准收紧限制要求强制启动宣布计划拟议"
+            if after_tag in _ACTION_VERBS:
+                enhanced = f"{m.group(1)}{issuing_authority}{enhanced[m.end():]}"
 
     # 2. 检测并注入矿种后缀
     if mineral_types and mineral_types != ["Others"]:
@@ -586,6 +725,7 @@ def insert_to_notion(data, source_url):
         md.get("country", ""),
         pd.get("current_stage", ""),
         md.get("mineral_types", []),
+        md.get("issuing_authority", ""),
     )
 
     # ---- 新建记录 ----
@@ -613,6 +753,17 @@ def insert_to_notion(data, source_url):
     # v3.1: 政策维度标签
     if pd.get("policy_dimension"):
         properties["政策维度"] = {"select": {"name": pd["policy_dimension"]}}
+
+    # v3.5: 颁布机构（需 Notion 数据库先手动添加"颁布机构"列，否则设为 false 跳过）
+    if os.environ.get("NOTION_HAS_AUTHORITY_FIELD", "").lower() == "true":
+        issuing_authority = md.get("issuing_authority", "")
+        if issuing_authority:
+            properties["颁布机构"] = {"rich_text": [{"text": {"content": issuing_authority}}]}
+
+    # v3.5: 时效性熔断标签 —— 若被标记为旧闻回顾，标题前缀加 ⏳，冲击烈度覆写为 Low_Monitoring
+    if data.get("_stale_flag"):
+        properties["政策名称"] = {"title": [{"text": {"content": f"⏳ {enhanced_title}"}}]}
+        properties["冲击烈度"] = {"select": {"name": "Low_Monitoring"}}
 
     # 动态注入生效日期（拦截空值防 Notion 报错）
     effective_date = (pd.get("effective_date") or "").strip()
@@ -685,10 +836,14 @@ def send_dingtalk_alert(data, source_url):
     impact = data["strategic_implications"].get("supply_chain_impact_level", "")
     alert_required = data["notion_integration"].get("dingtalk_alert_required", False)
 
-    # 双重保障：AI 判定 + 烈度级别直接判断
-    # High_Disruption / Moderate_Adjustment 推送，Low_Monitoring 静默过滤
-    if not alert_required and impact not in ("High_Disruption", "Moderate_Adjustment"):
-        print("ℹ️ 本条政策未达到钉钉实时告警阈值（Low_Monitoring），已通过防打扰机制过滤。")
+    # 🛑 硬锁 1：物理静默 — Low_Monitoring 永不推送（不管 LLM 怎么填 dingtalk_alert_required）
+    if impact == "Low_Monitoring":
+        print(f"🤫 [静默入库] 政策真实但烈度为 Low_Monitoring，仅入库 Notion 不推钉钉。")
+        return
+
+    # 🛑 硬锁 2：LLM 判定门控
+    if not alert_required:
+        print("ℹ️ LLM 判定本条政策未达到告警阈值，防打扰过滤。")
         return
 
     headers = {"Content-Type": "application/json"}
@@ -699,7 +854,7 @@ def send_dingtalk_alert(data, source_url):
 
     # v3.1: 在告警中展示政策维度
     dimension_label = pd.get('policy_dimension', '')
-    dimension_line = f"\n\n**🏷️ 政策维度**：`{dimension_label}`" if dimension_label else ""
+    dimension_line = f"\n\n**🏷️ 政策维度**：`{_fmt_dimension(dimension_label)}`" if dimension_label else ""
 
     # 冲击烈度 emoji 映射（替代不生效的 <font> 标签）
     impact_emoji = {
@@ -708,18 +863,22 @@ def send_dingtalk_alert(data, source_url):
         "Low_Monitoring": "🟢",
     }
     impact_level = si.get('supply_chain_impact_level', '')
-    impact_badge = f"{impact_emoji.get(impact_level, '⚪')} **{impact_level}**"
+    impact_badge = f"{impact_emoji.get(impact_level, '⚪')} **{_fmt_impact(impact_level)}**"
 
     # 条款拆解 → 要点列表（精简信息密度）
     provisions_raw = pd.get('substantive_provisions', '')
     provisions_bullets = _fmt_provisions(provisions_raw)
 
+    # v3.5: 颁布机构（双保险 —— 即使 LLM 标题里缺主语，卡片上也能看到）
+    authority = md.get('issuing_authority', '')
+    authority_line = f"\n\n**🏛️ 颁布机构**：`{authority}`" if authority else ""
+
     markdown_text = (
         f"### 📡 宏观政策雷达 · 重磅预警\n\n"
-        f"**📌 政策法案**：{pd.get('policy_name_zh') or '(未命名)'} ({pd.get('policy_name_original', '')})\n\n"
-        f"**🌍 影响范围**：`{md['country']}` ｜ 涉及矿种 `{', '.join(md['mineral_types'])}`"
+        f"**📌 政策法案**：{pd.get('policy_name_zh') or '(未命名)'} ({pd.get('policy_name_original', '')}){authority_line}\n\n"
+        f"**🌍 影响范围**：{_fmt_country(md['country'])} ｜ 涉及矿种 {_fmt_minerals(md['mineral_types'])}"
         f"{dimension_line}\n\n"
-        f"**⚖️ 法律阶段**：`{pd['current_stage']}` ｜ 生效日 `{pd.get('effective_date') or '未定'}`\n\n"
+        f"**⚖️ 法律阶段**：{_fmt_stage(pd['current_stage'])} ｜ 生效日 {pd.get('effective_date') or '未定'}\n\n"
         f"**🚨 冲击烈度**：{impact_badge}\n\n"
         f"━━━━━━━━━━━━━━\n\n"
         f"#### 📜 实质条款\n\n"
@@ -734,7 +893,7 @@ def send_dingtalk_alert(data, source_url):
     payload = {
         "msgtype": "markdown",
         "markdown": {
-            "title": f"📡 宏观政策雷达: {md['country']} 重磅预警",
+            "title": f"📡 宏观政策雷达: {_fmt_country(md['country'])} 重磅预警",
             "text": markdown_text
         }
     }
@@ -747,6 +906,112 @@ def send_dingtalk_alert(data, source_url):
             print(f"⚠️ [钉钉] 推送失败，详情: {res.text[:200]}")
     except Exception as e:
         print(f"❌ [钉钉] 推送异常: {str(e)}")
+
+
+def send_dingtalk_digest(policies):
+    """
+    【v3.5 汇总简报】将本轮所有通过门控的政策合并为单条钉钉摘要卡片。
+    按冲击烈度排序（High_Disruption 优先），区块间用分隔线隔开。
+    单条超过 4500 字时分片推送，每片标注 (第 x/N 片)。
+    """
+    webhook_url = os.environ.get("DINGTALK_WEBHOOK")
+    if not webhook_url or webhook_url == "disabled":
+        print("ℹ️ 暂未配置钉钉 Webhook，跳过告警触达阶段。")
+        return
+
+    # 加签模式
+    dingtalk_secret = os.environ.get("DINGTALK_SECRET")
+    if dingtalk_secret:
+        timestamp = str(round(time.time() * 1000))
+        string_to_sign = f"{timestamp}\n{dingtalk_secret}"
+        hmac_code = hmac.new(
+            dingtalk_secret.encode("utf-8"),
+            string_to_sign.encode("utf-8"),
+            digestmod=hashlib.sha256,
+        ).digest()
+        sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+        webhook_url = f"{webhook_url}&timestamp={timestamp}&sign={sign}"
+
+    # 按冲击烈度排序：High_Disruption 在前
+    impact_order = {"High_Disruption": 0, "Moderate_Adjustment": 1, "Low_Monitoring": 2}
+    policies_sorted = sorted(
+        policies,
+        key=lambda p: impact_order.get(
+            p[0].get("strategic_implications", {}).get("supply_chain_impact_level", ""), 2
+        )
+    )
+
+    n = len(policies_sorted)
+    impact_emoji = {
+        "High_Disruption": "🔴🔴",
+        "Moderate_Adjustment": "🟡",
+        "Low_Monitoring": "🟢",
+    }
+
+    # 构建每条政策的 markdown 区块
+    blocks = []
+    for i, (data, source_url) in enumerate(policies_sorted, 1):
+        pd_data = data.get("policy_dynamics", {})
+        si_data = data.get("strategic_implications", {})
+        md_data = data.get("metadata", {})
+
+        dimension_label = pd_data.get("policy_dimension", "")
+        dimension_line = f" ｜ 🏷️ {_fmt_dimension(dimension_label)}" if dimension_label else ""
+
+        impact_level = si_data.get("supply_chain_impact_level", "")
+        impact_badge = f"{impact_emoji.get(impact_level, '⚪')} **{_fmt_impact(impact_level)}**"
+
+        provisions_raw = pd_data.get("substantive_provisions", "")
+        provisions_bullets = _fmt_provisions(provisions_raw)
+
+        authority = md_data.get("issuing_authority", "")
+        authority_line = f"\n   🏛️ 颁布机构：{authority}" if authority else ""
+
+        block = (
+            f"#### 📌 #{i} {pd_data.get('policy_name_zh') or '(未命名)'}\n"
+            f"   📝 {pd_data.get('policy_name_original', '')}{authority_line}\n"
+            f"   🌍 {_fmt_country(md_data.get('country', '?'))} ｜ 矿种 {_fmt_minerals(md_data.get('mineral_types', []))}"
+            f"{dimension_line}\n"
+            f"   ⚖️ {_fmt_stage(pd_data.get('current_stage', '?'))} ｜ 生效 {pd_data.get('effective_date') or '未定'} ｜ {impact_badge}\n"
+            f"   > 📜 {provisions_bullets}\n"
+            f"   > 🔮 {si_data.get('impact_deduction', '')[:300]}\n"
+            f"   [🔗 原文]({source_url})"
+        )
+        blocks.append(block)
+
+    combined_body = "\n\n---\n\n".join(blocks)
+    header = f"### 📡 宏观政策雷达 · 本期共 {n} 条重磅预警"
+    full_text = f"{header}\n\n{combined_body}\n\n━━━━━━━━━━━━━━\n📋 提示：本报告已同步存入 Notion 数字化情报资产库。"
+
+    # 分片保护：钉钉 markdown 单条约 5000 字，保守按 4500 截断
+    MAX_CHUNK = 4500
+    headers_common = {"Content-Type": "application/json"}
+
+    def post_markdown(text, chunk_idx, total_chunks):
+        suffix = f"\n\n> 📄 第 {chunk_idx}/{total_chunks} 片" if total_chunks > 1 else ""
+        payload = {
+            "msgtype": "markdown",
+            "markdown": {
+                "title": f"📡 宏观政策雷达 · 第 {chunk_idx} 片",
+                "text": text + suffix
+            }
+        }
+        try:
+            res = requests.post(webhook_url, headers=headers_common, json=payload, timeout=10)
+            if res.status_code == 200:
+                print(f"🔔 [钉钉] 摘要推送成功（第 {chunk_idx}/{total_chunks} 片）。")
+            else:
+                print(f"⚠️ [钉钉] 推送失败（第 {chunk_idx}/{total_chunks} 片），详情: {res.text[:200]}")
+        except Exception as e:
+            print(f"❌ [钉钉] 推送异常（第 {chunk_idx}/{total_chunks} 片）: {str(e)}")
+
+    if len(full_text) <= MAX_CHUNK:
+        post_markdown(full_text, 1, 1)
+    else:
+        total_chunks = (len(full_text) + MAX_CHUNK - 1) // MAX_CHUNK
+        for ci in range(total_chunks):
+            chunk = full_text[ci * MAX_CHUNK : (ci + 1) * MAX_CHUNK]
+            post_markdown(chunk, ci + 1, total_chunks)
 
 
 # =============================================================================
@@ -765,6 +1030,9 @@ if __name__ == "__main__":
     ai_call_count = 0
     consecutive_empty = 0
     last_empty_feed_type = None
+
+    # v3.5: 收集本轮所有通过门控的政策，循环结束后合并为单条摘要推送
+    pending_alerts = []
 
     for source in all_active_sources:
         source_notes = source.get("notes", "")
@@ -786,7 +1054,14 @@ if __name__ == "__main__":
             else:
                 fetched_text = None
         elif source.get("feed_type") == "rss":
-            fetched_text = fetch_and_parse_rss(source["url"])
+            rss_result = fetch_and_parse_rss(source["url"])
+            if rss_result:
+                fetched_text = rss_result["text"]
+                # v3.4: 优先使用 RSS item 中提取的原文链接
+                if rss_result.get("links"):
+                    source_url = rss_result["links"][0]
+            else:
+                fetched_text = None
         else:
             fetched_text = fetch_and_clean_html(source["url"], source["dom_selector"])
 
@@ -811,6 +1086,16 @@ if __name__ == "__main__":
             break
 
         print(f"📥 [成功捕获] 原始线索已入流 ({len(fetched_text)} 字符)。正在调动 DeepSeek 进行矩阵式交叉研判...")
+
+        # v3.5: 前置年份预扫 —— 轻量正则提取文中所有四位年份，标记疑似旧文
+        import re as _re
+        _years_in_text = [int(y) for y in _re.findall(r'\b(19\d{2}|20[0-2]\d)\b', fetched_text)]
+        _max_year = max(_years_in_text) if _years_in_text else None
+        _current_year = datetime.now().year
+        is_likely_old = (_max_year is not None and _max_year <= _current_year - 1)
+        if is_likely_old:
+            print(f"   ⚠️ [预扫] 文本中最高年份为 {_max_year} → 疑似历史回顾文章，后续将交叉校验。")
+
         analysis_result = extract_macro_policy(fetched_text, schema)
         ai_call_count += 1
 
@@ -820,6 +1105,13 @@ if __name__ == "__main__":
             missing = [k for k in required_keys if k not in analysis_result]
             if missing:
                 print(f"⚠️ DeepSeek 返回 JSON 缺少关键字段: {missing}，跳过本条。")
+                consecutive_empty += 1
+                continue
+
+            # ---- v3.5 噪音粉碎：最高优先级杀伤开关 ----
+            # LLM 明确判定为无效输入（网页导航/无关新闻/纯内政），直接丢弃
+            if analysis_result.get("is_valid_macro_policy") is False:
+                print("🗑️ [噪音粉碎] 网页导航/无关新闻/纯内政措施，已直接丢弃。")
                 consecutive_empty += 1
                 continue
 
@@ -848,6 +1140,43 @@ if __name__ == "__main__":
             consecutive_empty = 0
             last_empty_feed_type = None
 
-            print(f"🎉 战略情报研判完成。开始启动终端合流分流流控...")
+            # ---- v3.5: 第二道防线 — LLM 时效性校验 + 年份交叉验证 ----
+            nrv = analysis_result.get("news_recency_verification", {})
+            is_recent = nrv.get("is_recent_policy_action", True)  # 缺字段保守放行
+            declared_year = nrv.get("declared_publish_year")
+            # 交叉校验：LLM 说 recent=true 但年份 ≤ 2024 → 矛盾
+            year_conflict = (is_recent and isinstance(declared_year, int) and declared_year <= 2024)
+            is_stale = (not is_recent) or year_conflict or is_likely_old
+
+            if is_stale:
+                analysis_result["strategic_implications"]["supply_chain_impact_level"] = "Low_Monitoring"
+                analysis_result["notion_integration"]["dingtalk_alert_required"] = False
+                analysis_result["_stale_flag"] = True
+                reason = []
+                if not is_recent: reason.append("LLM判定非近期政策")
+                if year_conflict: reason.append(f"年份矛盾(声称={declared_year})")
+                if is_likely_old: reason.append(f"预扫旧年份(max={_max_year})")
+                print(f"🛡️ [时效性熔断] {', '.join(reason)} → 降为 Low_Monitoring，仅入库不推送。")
+
+            # v3.4: 优先使用 AI 从原文中提取的政策全文链接，fallback 到源地址
+            # v3.5: AI 吐出的链接若仍是 Google News 跳转链，也解码一遍
+            ai_source_url = analysis_result.get("notion_integration", {}).get("source_article_url", "")
+            if ai_source_url and ai_source_url.startswith("http"):
+                source_url = resolve_google_news_url(ai_source_url)
+
+            print(f"🎉 战略情报研判完成。")
             insert_to_notion(analysis_result, source_url)
-            send_dingtalk_alert(analysis_result, source_url)
+
+            # v3.5: 仅 High_Disruption / Moderate_Adjustment 加入推送队列
+            impact = analysis_result["strategic_implications"].get("supply_chain_impact_level", "")
+            if impact in ("High_Disruption", "Moderate_Adjustment"):
+                pending_alerts.append((analysis_result, source_url))
+            else:
+                print(f"🤫 [静默入库] 烈度 {impact}，仅入库 Notion 不推送钉钉。")
+
+    # ---- v3.5: 汇总推送 ----
+    if pending_alerts:
+        print(f"\n📬 本轮共 {len(pending_alerts)} 条政策通过研判，正在汇总为单条摘要推送...")
+        send_dingtalk_digest(pending_alerts)
+    else:
+        print("\nℹ️ 本轮无政策达到钉钉推送阈值。")

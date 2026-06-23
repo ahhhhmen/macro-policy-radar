@@ -1403,6 +1403,30 @@ _CONFIDENCE_ZH_MAP = {
     "Low": "低",
 }
 
+# ---- v5.3: 推送徽标映射 ----
+_IMPACT_EMOJI = {
+    "High_Disruption": "🔴", "Moderate_Adjustment": "🟡", "Low_Monitoring": "🟢",
+}
+_CONFIDENCE_EMOJI = {
+    "High": "🟢", "Medium": "🟡", "Low": "🔴",
+}
+_STAGE_EMOJI = {
+    "Proposal": "📝", "Under_Debate": "🗣️", "Approved_Not_Effective": "⏳",
+    "Fully_Effective": "✅", "Suspended": "⏸️", "Procedural_Statement": "📄",
+    "Unverified": "❓", "Historical_Noise": "📚",
+}
+_DOC_TYPE_ZH = {
+    "Law": "法律", "Regulation": "政府条例", "Policy": "政策",
+    "Standard": "行业标准", "Administrative_Order": "行政令", "Other": "其他",
+}
+_MASTER_TAG_ZH = {
+    "Resource_Nationalism": "资源民族主义",
+    "Trade_Barrier": "贸易壁垒",
+    "Compliance_Standard": "合规标准",
+    "Supply_Chain_Subsidy": "供应链补贴",
+    "Others": "其他",
+}
+
 # ---- v4.5: Notion 补充字段映射 ----
 _COUNTRY_TO_REGION = {
     "CN": "中国 China", "ID": "印尼 Indonesia", "CD": "刚果（金）DRC",
@@ -1454,6 +1478,7 @@ _SOURCE_TYPE_ZH_MAP = {
 _MINERAL_ZH_MAP = {
     "Lithium": "锂", "Cobalt": "钴", "Nickel": "镍",
     "Copper": "铜", "Rare Earths": "稀土", "Graphite": "石墨",
+    "Tungsten": "钨", "Gallium": "镓", "Germanium": "锗", "Indium": "铟",
     "Others": "其他",
 }
 
@@ -1498,7 +1523,11 @@ def _fmt_stage(stage):
 def _fmt_minerals(types):
     if not types:
         return "—"
-    return "、".join(_MINERAL_ZH_MAP.get(m, m) for m in types)
+    # 有具体矿种时过滤掉 "Others"
+    specific = [m for m in types if m != "Others"]
+    if specific:
+        return "、".join(_MINERAL_ZH_MAP.get(m, m) for m in specific)
+    return "其他"
 
 def _fmt_dimension(dim):
     return _DIMENSION_ZH_MAP.get(dim, dim)
@@ -1941,33 +1970,97 @@ def send_dingtalk_digest(policies):
 
     n = len(policies_sorted)
 
-    # v5.1: 精简卡片——entity + event_summary + impact + source
+    # v5.3: 三层结构卡片 —— 事实层 → 基线层 → 分析层（防幻觉 + 决策参考）
     blocks = []
     for i, (data, source_url) in enumerate(policies_sorted, 1):
         entity = data.get("policy_entity", {}) or {}
         event = data.get("event_update", {}) or {}
         md_data = data.get("metadata", {}) or {}
+        pd_data = data.get("policy_dynamics", {}) or {}
         si_data = data.get("strategic_implications", {}) or {}
 
         ec = event.get("event_classification", "")
         alert_label = "🆕 新政策出台" if ec == "New_Policy_Issuance" else "🔄 法案重大推进"
 
+        # ── 元数据行 ──
+        authority = md_data.get("issuing_authority", "")
+        doc_type = _DOC_TYPE_ZH.get(entity.get("document_type", ""), "")
+        if authority and doc_type:
+            authority_line = f"🏛 {authority} · {doc_type}"
+        elif authority:
+            authority_line = f"🏛 {authority}"
+        else:
+            authority_line = ""
+
+        name_cn = entity.get("chinese_translation") or pd_data.get("policy_name_zh") or entity.get("official_name") or "(未命名)"
+        name_en = entity.get("official_name", "")
+        if name_en and name_en != name_cn:
+            title_line = f"📋 {name_cn}  ({name_en})"
+        else:
+            title_line = f"📋 {name_cn}"
+
+        stage = entity.get("current_stage") or pd_data.get("current_stage", "")
+        stage_zh = _STAGE_ZH_MAP.get(stage, stage) if stage else ""
+        stage_emoji = _STAGE_EMOJI.get(stage, "") if stage else ""
+        eff_date = pd_data.get("effective_date", "")
+        stage_line = f"{stage_emoji} {stage_zh}" if stage_zh else ""
+        if eff_date and eff_date != "unknown":
+            stage_line += f" ｜ 生效 {eff_date}"
+
+        impact = si_data.get("supply_chain_impact_level", "")
+        confidence = si_data.get("analytic_confidence", "")
+        impact_emoji = _IMPACT_EMOJI.get(impact, "")
+        conf_emoji = _CONFIDENCE_EMOJI.get(confidence, "")
+        metrics_line = f"{impact_emoji} {_fmt_impact(impact)} ｜ {conf_emoji} 置信度 {_CONFIDENCE_ZH_MAP.get(confidence, confidence)}"
+
+        # 范式转移警告
+        paradigm_warning = ""
+        if si_data.get("baseline_shift_detected") is True:
+            paradigm_warning = "\n⚠️ **【历史基线已被打破】** 请核查 knowledge_baselines.yaml"
+
+        # ── 组合卡片 ──
+        meta_block = []
+        if authority_line:
+            meta_block.append(authority_line)
+        meta_block.append(title_line)
+        meta_block.append(f"🌍 {_fmt_country(md_data.get('country', '?'))} ｜ {_fmt_minerals(md_data.get('mineral_types', []))}")
+        if stage_line:
+            meta_block.append(stage_line)
+        meta_block.append(metrics_line)
+
+        # 标签
+        master_tag = entity.get("master_tag", "")
+        tag_zh = _MASTER_TAG_ZH.get(master_tag, "")
+        if tag_zh:
+            meta_block.append(f"🏷 {tag_zh}")
+
+        # ── 三层结构 ──
+        # 事实层
+        factual = pd_data.get("substantive_provisions") or pd_data.get("factual_basis") or ""
+        # 基线层
+        baseline = si_data.get("industry_baseline_recall", "")
+        # 分析层
+        deduction = event.get("event_impact_deduction") or si_data.get("impact_deduction", "")
+
         block = (
-            f"#### {alert_label} #{i}：{entity.get('chinese_translation') or entity.get('official_name') or '(未命名)'}\n"
-            f"> 🌍 {_fmt_country(md_data.get('country', '?'))} ｜ 矿种 {_fmt_minerals(md_data.get('mineral_types', []))}\n"
-            f"> 📜 {entity.get('official_name', '')[:200]}\n"
-            f"---\n"
-            f"**🚨 本次动态 (What Happened)**\n"
-            f"> {event.get('event_summary', '')[:300]}\n\n"
-            f"**🔮 战略推演 (Directional Impact)**\n"
-            f"> {event.get('event_impact_deduction', si_data.get('impact_deduction', ''))[:300]}\n\n"
-            f"🔗 [溯源原文]({source_url})"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{alert_label} #{i}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            + "\n".join(meta_block) +
+            f"{paradigm_warning}\n\n"
+            f"📜 **事实层**（原文可核）\n"
+            f"{factual[:400]}\n\n"
+            f"⚓ **产业基线**（行业共识）\n"
+            f"{baseline[:300]}\n\n"
+            f"🔮 **战略推演**\n"
+            f"{deduction[:400]}\n\n"
+            f"🔗 [查看原文]({source_url})"
         )
         blocks.append(block)
 
-    combined_body = "\n\n---\n\n".join(blocks)
-    header = f"### 📡 宏观政策雷达 · 本期 {n} 条预警"
-    full_text = f"{header}\n\n{combined_body}\n\n━━━\n📋 已同步存入 Notion 情报资产库。全文时间轴请查看对应文件页面。"
+    combined_body = "\n\n".join(blocks)
+    header = f"📡 宏观政策雷达 · 本期 {n} 条预警"
+    full_text = f"{header}\n\n{combined_body}\n\n━━━━━━━━━━━━━━━━━━━━━━\n📋 已同步存入 Notion 情报资产库"
 
     send_dingtalk(
         webhook_url=webhook_url,

@@ -42,6 +42,45 @@ macro-policy-radar/
     └── baseline_auditor.yml             # 每季度基线审计调度
 ```
 
+共享基础设施（LLM 缓存/重试/抓取/推送等）由 [radar-infra](https://github.com/ahhhhmen/radar-infra) 提供。
+
+---
+
+## 快速开始
+
+### 前置要求
+
+- Python 3.10+
+- [DeepSeek API key](https://platform.deepseek.com/)
+- （可选）[NewsAPI key](https://newsapi.org/) — 不配则走 Google News RSS 回退
+- （可选）Notion 集成 token + 数据库 ID
+
+```bash
+# 1. 克隆项目
+git clone https://github.com/ahhhhmen/macro-policy-radar.git
+cd macro-policy-radar
+
+# 2. 创建 .env 文件，至少填入 DeepSeek key
+cat > .env << 'EOF'
+DEEPSEEK_API_KEY=sk-your-key-here
+# 可选配置
+# NEWSAPI_KEY=xxx
+# NOTION_TOKEN=secret_xxx
+# NOTION_DATABASE_ID=xxx
+# DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxx
+# DINGTALK_SECRET=xxx
+EOF
+
+# 3. 安装依赖（自动拉取 radar-infra）
+pip install -r requirements.txt
+
+# 4. 运行
+python main.py
+
+# 仅更新基线时间戳
+python audit_baselines.py --update-timestamp
+```
+
 ---
 
 ## 架构总览

@@ -1533,6 +1533,42 @@ def _fmt_dimension(dim):
     return _DIMENSION_ZH_MAP.get(dim, dim)
 
 
+def _strip_sanitizer_markers(text: str) -> str:
+    """移除数字净化标记 ⚠️XX(待核)，用于推送卡片（Notion 保留标记供人工复核）。"""
+    import re
+    return re.sub(r"⚠️[\d.,%]+\(待核\)", r"\1", text)
+
+
+def _fmt_authority(name: str) -> str:
+    """常见颁布机构英文→中文映射，未匹配则返回原文。"""
+    _AUTHORITY_EN2ZH = {
+        "Government of Indonesia": "印尼政府",
+        "Ministry of Energy and Mineral Resources": "印尼能矿部 (ESDM)",
+        "Ministry of Trade": "印尼贸易部",
+        "Ministry of Finance": "印尼财政部",
+        "Coordinating Ministry for Economic Affairs": "印尼经济统筹部",
+        "State Council of China": "中国国务院",
+        "Ministry of Commerce of China": "中国商务部",
+        "Ministry of Commerce": "中国商务部",
+        "National Development and Reform Commission": "中国发改委",
+        "European Commission": "欧盟委员会",
+        "European Parliament": "欧洲议会",
+        "Government of Chile": "智利政府",
+        "Government of Australia": "澳大利亚政府",
+        "Government of DRC": "刚果(金)政府",
+        "Presidential Office": "总统府",
+    }
+    return _AUTHORITY_EN2ZH.get(name, name)
+
+
+def _fmt_source_link(url: str) -> str:
+    """从 URL 提取域名作为链接显示文本。"""
+    import re
+    m = re.search(r"https?://([^/]+)", url)
+    domain = m.group(1) if m else url[:60]
+    return f"🔗 [查看原文 ({domain})]({url})"
+
+
 def _enhance_policy_title(policy_name_zh, country, current_stage, mineral_types=None, issuing_authority=""):
     """
     【v3.3 情报级标题增强 — Action-Oriented Intelligence Title】
@@ -1983,7 +2019,7 @@ def send_dingtalk_digest(policies):
         alert_label = "🆕 新政策出台" if ec == "New_Policy_Issuance" else "🔄 法案重大推进"
 
         # ── 元数据行 ──
-        authority = md_data.get("issuing_authority", "")
+        authority = _fmt_authority(md_data.get("issuing_authority", ""))
         doc_type = _DOC_TYPE_ZH.get(entity.get("document_type", ""), "")
         if authority and doc_type:
             authority_line = f"🏛 {authority} · {doc_type}"
@@ -2016,7 +2052,7 @@ def send_dingtalk_digest(policies):
         # 范式转移警告
         paradigm_warning = ""
         if si_data.get("baseline_shift_detected") is True:
-            paradigm_warning = "\n⚠️ **【历史基线已被打破】** 请核查 knowledge_baselines.yaml"
+            paradigm_warning = "\n\n⚠️ **【历史基线已被打破】** 请核查 knowledge_baselines.yaml"
 
         # ── 组合卡片 ──
         meta_block = []
@@ -2034,28 +2070,29 @@ def send_dingtalk_digest(policies):
         if tag_zh:
             meta_block.append(f"🏷 {tag_zh}")
 
-        # ── 三层结构 ──
-        # 事实层
-        factual = pd_data.get("substantive_provisions") or pd_data.get("factual_basis") or ""
-        # 基线层
-        baseline = si_data.get("industry_baseline_recall", "")
-        # 分析层
-        deduction = event.get("event_impact_deduction") or si_data.get("impact_deduction", "")
+        # ── 三层结构（数字净化标记已移除，Notion 保留供复核）──
+        factual = _strip_sanitizer_markers(pd_data.get("substantive_provisions") or pd_data.get("factual_basis") or "")
+        baseline = _strip_sanitizer_markers(si_data.get("industry_baseline_recall", ""))
+        deduction = _strip_sanitizer_markers(event.get("event_impact_deduction") or si_data.get("impact_deduction", ""))
 
-        block = (
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{alert_label} #{i}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            + "\n".join(meta_block) +
-            f"{paradigm_warning}\n\n"
-            f"📜 **事实层**（原文可核）\n"
-            f"{factual[:400]}\n\n"
-            f"⚓ **产业基线**（行业共识）\n"
-            f"{baseline[:300]}\n\n"
-            f"🔮 **战略推演**\n"
-            f"{deduction[:400]}\n\n"
-            f"🔗 [查看原文]({source_url})"
-        )
+        block = "\n\n".join([
+            f"{alert_label} #{i}",
+            "",
+            *meta_block,
+            paradigm_warning.strip(),
+            "",
+            "─────────────────────",
+            "📜 **事实层**（原文可核）",
+            (factual[:400] if factual else "(未提取到事实层内容)"),
+            "",
+            "⚓ **产业基线**（行业共识）",
+            (baseline[:300] if baseline else "(未提取到基线层内容)"),
+            "",
+            "🔮 **战略推演**",
+            (deduction[:400] if deduction else "(未提取到分析层内容)"),
+            "",
+            _fmt_source_link(source_url),
+        ])
         blocks.append(block)
 
     combined_body = "\n\n".join(blocks)

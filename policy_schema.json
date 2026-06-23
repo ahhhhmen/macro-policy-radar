@@ -103,7 +103,7 @@
       "properties": {
         "supply_chain_impact_level": { "type": "string", "enum": ["High_Disruption","Moderate_Adjustment","Low_Monitoring"] },
         "analytic_confidence": { "type": "string", "enum": ["High","Medium","Low"] },
-        "industry_baseline_recall": { "type": "string", "description": "智库基线定锚" },
+        "industry_baseline_recall": { "type": "string", "description": "【防冗余锚点 · v5.3】只允许写该国该矿种的历史旧基线（如：印尼自2020年禁止未加工镍矿出口）。绝对禁止在此字段复述本次新闻的新事实/新规定！新事实只准写在 substantive_provisions 和 event_summary 里。若旧基线被本次新规实质性颠覆，仅需在句末追加：'⚠️ 旧基线已被本次新规打破'。字数限80字。" },
         "baseline_shift_detected": { "type": "boolean" },
         "impact_deduction": { "type": "string", "description": "自动设为 event_impact_deduction" }
       },

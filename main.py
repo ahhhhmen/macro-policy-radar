@@ -575,6 +575,11 @@ _SYSTEM_PROMPT_V40 = (
     "- 原文未提及的内容，禁止补全。宁可写『原文未披露』，不可编造。\n"
     "- 任何数字（百分比、金额、产能、税率）必须来自原文；推演性估算必须显式标注『分析师估算』。\n"
     "- 严禁编造『出口量缩减 X%』『产能波及 X 万吨』『成本上升 X%』等原文没有的量化结论。\n\n"
+    "【输出纯净度铁律 · v5.3 新增】\n"
+    "- 绝对禁止在输出的任何文本字段中夹带自我批注！\n"
+    "- 遇到不确定的数字、日期或专有名词，要么直接提取原文，要么进行合理概括。\n"
+    "- 严禁使用任何形如『(待核)』『(?)』『[不确定]』『[存疑]』『⚠️』等标签或符号污染输出文本！\n"
+    "- 你的输出是面向高管的终稿，不是带批注的草稿。任何自我审视的旁注都会破坏专业可信度。\n\n"
     "【智库产业基线定锚（CoT · 防止常识性时空错乱）】\n"
     "- 在撰写 impact_deduction 之前，你必须先在 industry_baseline_recall 中回答：\n"
     "  该国在该矿种上的现行政策现状是什么？核心产能格局如何？\n"
@@ -600,12 +605,13 @@ _SYSTEM_PROMPT_V40 = (
     "  → supply_chain_impact_level 不得评为 High_Disruption\n"
     "  → 标题应体现『发布xx说明/指引/流程』而非『收紧/管控/冲击』\n\n"
     "【目标矿种范围（is_valid_macro_policy 杀伤开关）】\n"
-    "本系统仅追踪以下 6 种关键矿产的政策动态：锂、钴、镍、铜、稀土、石墨。\n"
+    "本系统追踪以下 10 种关键矿产的政策动态：锂、钴、镍、铜、稀土、石墨、钨、镓、锗、铟。\n"
     "以下品类不属于目标范围，必须判定 is_valid_macro_policy=false：\n"
     "  - 石油/原油、天然气/LNG、煤炭、铁矿石、铝土矿、金、银、钻石\n"
     "  - 能源安全政策（如天然气保留计划、石油储备、煤炭出口禁令等）\n"
     "  - 农业大宗商品、粮食安全政策\n"
-    "若原文仅涉及上述排除品类而未触及 6 种目标矿产，直接判无效。\n\n"
+    "若原文仅涉及上述排除品类而未触及 10 种目标矿产，直接判无效。\n"
+    "⚠️ 特别注意：钨、镓、锗、铟是新增的合法目标矿产，这些矿产的出口管制/配额/限制政策必须判定为有效。\n\n"
     "【v5.0 实体-事件分离 · 核心架构】\n"
     "- policy_entity：描述『政策文件本身』（稳定的、跨报道不变的标识信息）\n"
     "  · official_name：从原文提取最完整、最官方的法案名称原文（去重主键）。宁可保留原文长全称，不要自己缩写。\n"
@@ -2016,7 +2022,21 @@ def send_dingtalk_digest(policies):
         si_data = data.get("strategic_implications", {}) or {}
 
         ec = event.get("event_classification", "")
-        alert_label = "🆕 新政策出台" if ec == "New_Policy_Issuance" else "🔄 法案重大推进"
+        if ec == "New_Policy_Issuance":
+            alert_label = "🆕 新政首发"
+            impact_color = "#FF0000"
+        else:
+            alert_label = "🔄 法案演进"
+            impact_color = "#FF9900"
+
+        name_cn = entity.get("chinese_translation") or pd_data.get("policy_name_zh") or entity.get("official_name") or "(未命名)"
+        name_en = entity.get("official_name", "")
+
+        # ── 标题行（含政策名称，一目了然）──
+        if name_en and name_en != name_cn:
+            title_line = f"{alert_label} #{i}：{name_cn}  ({name_en})"
+        else:
+            title_line = f"{alert_label} #{i}：{name_cn}"
 
         # ── 元数据行 ──
         authority = _fmt_authority(md_data.get("issuing_authority", ""))
@@ -2027,13 +2047,6 @@ def send_dingtalk_digest(policies):
             authority_line = f"🏛 {authority}"
         else:
             authority_line = ""
-
-        name_cn = entity.get("chinese_translation") or pd_data.get("policy_name_zh") or entity.get("official_name") or "(未命名)"
-        name_en = entity.get("official_name", "")
-        if name_en and name_en != name_cn:
-            title_line = f"📋 {name_cn}  ({name_en})"
-        else:
-            title_line = f"📋 {name_cn}"
 
         stage = entity.get("current_stage") or pd_data.get("current_stage", "")
         stage_zh = _STAGE_ZH_MAP.get(stage, stage) if stage else ""
@@ -2047,28 +2060,32 @@ def send_dingtalk_digest(policies):
         confidence = si_data.get("analytic_confidence", "")
         impact_emoji = _IMPACT_EMOJI.get(impact, "")
         conf_emoji = _CONFIDENCE_EMOJI.get(confidence, "")
-        metrics_line = f"{impact_emoji} {_fmt_impact(impact)} ｜ {conf_emoji} 置信度 {_CONFIDENCE_ZH_MAP.get(confidence, confidence)}"
 
-        # 范式转移警告
-        paradigm_warning = ""
+        # ── 范式转移警告（Blockquote 提亮，视觉优先）──
+        paradigm_block = ""
         if si_data.get("baseline_shift_detected") is True:
-            paradigm_warning = "\n\n⚠️ **【历史基线已被打破】** 请核查 knowledge_baselines.yaml"
+            paradigm_block = (
+                "> 🚨 **【系统严重警告】历史基线已被彻底打破**\n"
+                "> 本次情报构成对旧基线的颠覆。请注意底层逻辑生变！\n"
+                "> 请核查 knowledge_baselines.yaml 是否需要更新。"
+            )
 
         # ── 组合卡片 ──
-        meta_block = []
+        meta_lines = [title_line, ""]
+        if paradigm_block:
+            meta_lines.append(paradigm_block)
+            meta_lines.append("")
         if authority_line:
-            meta_block.append(authority_line)
-        meta_block.append(title_line)
-        meta_block.append(f"🌍 {_fmt_country(md_data.get('country', '?'))} ｜ {_fmt_minerals(md_data.get('mineral_types', []))}")
+            meta_lines.append(authority_line)
+        meta_lines.append(f"🌍 {_fmt_country(md_data.get('country', '?'))} ｜ 💎 {_fmt_minerals(md_data.get('mineral_types', []))}")
         if stage_line:
-            meta_block.append(stage_line)
-        meta_block.append(metrics_line)
-
-        # 标签
+            meta_lines.append(stage_line)
+        # 冲击烈度用颜色强调
+        meta_lines.append(f"⚖️ 冲击烈度：<font color='{impact_color}'>{impact_emoji} {_fmt_impact(impact)}</font> ｜ 🎯 置信度：{conf_emoji} {_CONFIDENCE_ZH_MAP.get(confidence, confidence)}")
         master_tag = entity.get("master_tag", "")
         tag_zh = _MASTER_TAG_ZH.get(master_tag, "")
         if tag_zh:
-            meta_block.append(f"🏷 {tag_zh}")
+            meta_lines.append(f"🏷 {tag_zh}")
 
         # ── 三层结构（数字净化标记已移除，Notion 保留供复核）──
         factual = _strip_sanitizer_markers(pd_data.get("substantive_provisions") or pd_data.get("factual_basis") or "")
@@ -2076,19 +2093,15 @@ def send_dingtalk_digest(policies):
         deduction = _strip_sanitizer_markers(event.get("event_impact_deduction") or si_data.get("impact_deduction", ""))
 
         block = "\n\n".join([
-            f"{alert_label} #{i}",
-            "",
-            *meta_block,
-            paradigm_warning.strip(),
-            "",
+            *meta_lines,
             "─────────────────────",
-            "📜 **事实层**（原文可核）",
+            "📜 **核心事实层**（原文可核）",
             (factual[:400] if factual else "(未提取到事实层内容)"),
             "",
-            "⚓ **产业基线**（行业共识）",
+            "⚓ **历史基线对照**（行业共识）",
             (baseline[:300] if baseline else "(未提取到基线层内容)"),
             "",
-            "🔮 **战略推演**",
+            "🔮 **节点战略推演**（Directional Impact）",
             (deduction[:400] if deduction else "(未提取到分析层内容)"),
             "",
             _fmt_source_link(source_url),

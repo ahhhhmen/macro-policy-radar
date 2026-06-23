@@ -23,7 +23,15 @@ import yaml
 import time
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from llm_cache import get_cached_client
+from radar_infra.llm import DeepSeekProvider, CachedLLMClient
+
+_llm_client = None
+
+def _get_llm_client():
+    global _llm_client
+    if _llm_client is None:
+        _llm_client = CachedLLMClient(DeepSeekProvider())
+    return _llm_client
 
 load_dotenv()
 
@@ -40,9 +48,6 @@ BASELINE_PATH = os.path.join(PROJECT_DIR, "knowledge_baselines.yaml")
 #  复用 main.py 的抓取基础设施（最小化导入，避免循环依赖）
 # =============================================================================
 
-def _get_llm_client():
-    """获取全局 CachedLLMClient 单例（v5.0: 缓存命中优化）"""
-    return get_cached_client()
 
 
 def _resolve_google_news_url(google_url):
@@ -182,7 +187,7 @@ def _audit_single_country(country_code, country_name, rules, client):
     rules_text = "\n".join(f"  [{i}] {r}" for i, r in enumerate(rules))
 
     try:
-        response = client.chat_completion(
+        content = client.chat_completion(
             task_type="baseline_audit",
             model="deepseek-v4-pro",
             messages=[
@@ -197,10 +202,8 @@ def _audit_single_country(country_code, country_name, rules, client):
                 },
             ],
             response_format={"type": "json_object"},
-            temperature=0.0,  # v5.0: 确定性输出 → 提升缓存命中率
-            timeout=60,
+            temperature=0.0,
         )
-        content = response.choices[0].message.content
         result = json.loads(content) if content else {"changed": False}
     except Exception as e:
         print(f"   ❌ DeepSeek 审计调用失败: {str(e)[:100]}")

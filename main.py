@@ -2,18 +2,20 @@ import os
 import re
 import json
 import yaml
-import time
-import hmac
-import hashlib
-import base64
 import requests
 import urllib.parse
 import urllib3
 import concurrent.futures
+import logging
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-from llm_cache import get_cached_client
+from radar_infra.llm import DeepSeekProvider, CachedLLMClient, create_llm_retry_decorator
+from radar_infra.guard import CircuitBreaker, sanitize_numbers
+from radar_infra.sink import send_dingtalk
+from radar_infra.support import setup_logging
+
+logger = setup_logging("macro_policy_radar")
 
 # v3.1: 容忍部分政府网站 SSL 证书问题
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -52,7 +54,7 @@ def load_knowledge_baselines(yaml_path):
     返回 (dict{country_code: [rule_strings]}, last_updated: str)
     """
     if not os.path.isfile(yaml_path):
-        print(f"ℹ️ 基线知识库文件不存在 ({yaml_path})，跳过注入。")
+        logger.info(f"ℹ️ 基线知识库文件不存在 ({yaml_path})，跳过注入。")
         return {}, "unknown"
     try:
         with open(yaml_path, 'r', encoding='utf-8') as f:
@@ -69,7 +71,7 @@ def load_knowledge_baselines(yaml_path):
                 result[code] = entry["rules"]
         return result, config.get("last_updated", "unknown")
     except Exception as e:
-        print(f"⚠️ 基线知识库加载失败: {str(e)[:100]}")
+        logger.warning(f"⚠️ 基线知识库加载失败: {str(e)[:100]}")
         return {}, "unknown"
 
 
@@ -133,7 +135,7 @@ def load_all_sources(yaml_path):
                     "days_back": days_back,
                 })
             if hotspots:
-                print(f"🔥 自适应热点发现已激活，本周期新增 {len(hotspots)} 条动态查询。")
+                logger.info(f"🔥 自适应热点发现已激活，本周期新增 {len(hotspots)} 条动态查询。")
 
         return sources
 
@@ -150,7 +152,7 @@ def fetch_and_clean_html(url, selector):
             return target_zone.get_text(separator="\n", strip=True)
         return soup.body.get_text(separator="\n", strip=True) if soup.body else "Empty Body"
     except Exception as e:
-        print(f"⚠️ HTML 抓取失败 [{url[:50]}...]: {str(e)[:100]}")
+        logger.warning(f"⚠️ HTML 抓取失败 [{url[:50]}...]: {str(e)[:100]}")
         return None
 
 
@@ -211,7 +213,7 @@ def fetch_article_full_text(article_url):
         # 过短 —— 可能是 paywall / JS 渲染 / 登录墙，如实降级
         return None, "shallow"
     except Exception as e:
-        print(f"   ⚠️ [二级抓取] 正文解析失败 [{article_url[:60]}...]: {str(e)[:80]}")
+        logger.warning(f"   ⚠️ [二级抓取] 正文解析失败 [{article_url[:60]}...]: {str(e)[:80]}")
         return None, "shallow"
 
 def _parse_rss_date(pub_date_str):
@@ -258,7 +260,7 @@ def resolve_google_news_url(google_url):
             return final_url
         return google_url
     except Exception as e:
-        print(f"⚠️ Google News 链接解码失败 [{google_url[:60]}...]: {str(e)[:80]}")
+        logger.warning(f"⚠️ Google News 链接解码失败 [{google_url[:60]}...]: {str(e)[:80]}")
         return google_url
 
 
@@ -311,7 +313,7 @@ def fetch_and_parse_rss(url, limit=3):
                     full_text_trimmed = full_text[:4000]
                     fulltext_block = f"\n【原文正文（v4.0 二级抓取）】\n{full_text_trimmed}"
                     depth_max = "full"
-                    print(f"   📥 [二级抓取] 成功补全正文 {len(full_text)} 字符 [{item_link[:50]}...]")
+                    logger.info(f"   📥 [二级抓取] 成功补全正文 {len(full_text)} 字符 [{item_link[:50]}...]")
                 else:
                     fulltext_block = f"\n【⚠️ 原文正文抓取失败，仅基于标题+摘要研判，信息深度: shallow】"
 
@@ -322,13 +324,13 @@ def fetch_and_parse_rss(url, limit=3):
                 f"标题: {title}\n详情摘要: {clean_desc}{fulltext_block}{pub_line}{link_line}"
             )
         if skipped_old:
-            print(f"   ⏰ [RSS] 过滤 {skipped_old} 条超过 {RSS_MAX_AGE_DAYS} 天的旧文。")
+            logger.info(f"   ⏰ [RSS] 过滤 {skipped_old} 条超过 {RSS_MAX_AGE_DAYS} 天的旧文。")
         if not combined_policies:
-            print(f"   ⏰ [RSS] 本源全部 item 超过 {RSS_MAX_AGE_DAYS} 天，整源跳过。")
+            logger.info(f"   ⏰ [RSS] 本源全部 item 超过 {RSS_MAX_AGE_DAYS} 天，整源跳过。")
             return None
         return {"text": "\n\n".join(combined_policies), "links": links, "source_depth": depth_max}
     except Exception as e:
-        print(f"⚠️ RSS 接口请求失败: {str(e)}")
+        logger.warning(f"⚠️ RSS 接口请求失败: {str(e)}")
         return None
 
 
@@ -356,7 +358,7 @@ def _fetch_newsapi_single_lang(query, days_back, lang, api_key):
         res.raise_for_status()
         data = res.json()
         if data.get("status") != "ok":
-            print(f"   ⚠️ NewsAPI [{lang}] 返回异常: {data.get('message', '')[:80]}")
+            logger.warning(f"   ⚠️ NewsAPI [{lang}] 返回异常: {data.get('message', '')[:80]}")
             return None
         articles = data.get("articles", [])
         if not articles:
@@ -379,12 +381,12 @@ def _fetch_newsapi_single_lang(query, days_back, lang, api_key):
                         f"标题: {title}\n摘要: {desc}\n【原文正文（v4.0 二级抓取）】\n{full_text_trimmed}"
                     )
                     depth_max = "full"
-                    print(f"   📥 [二级抓取] NewsAPI 头条正文补全 {len(full_text)} 字符 [{art_url[:50]}...]")
+                    logger.info(f"   📥 [二级抓取] NewsAPI 头条正文补全 {len(full_text)} 字符 [{art_url[:50]}...]")
                     continue
             combined.append(f"--- [线索 #{idx+1} | lang={lang} | depth=shallow] ---\n标题: {title}\n摘要: {desc}")
         return {"text": "\n\n".join(combined), "source_url": first_url, "language": lang, "source_depth": depth_max}
     except Exception as e:
-        print(f"   ⚠️ NewsAPI [{lang}] 请求失败: {e}")
+        logger.warning(f"   ⚠️ NewsAPI [{lang}] 请求失败: {e}")
         return None
 
 
@@ -417,7 +419,7 @@ def fetch_newsapi_multilang(query, days_back=7):
     api_key = os.environ.get("NEWSAPI_KEY")
 
     if not api_key or api_key == "disabled":
-        print("ℹ️ 未配置 NEWSAPI_KEY，直接走 Google News RSS 多语言管道...")
+        logger.info("ℹ️ 未配置 NEWSAPI_KEY，直接走 Google News RSS 多语言管道...")
         all_results = []
         for lang in RSS_FALLBACK_LANGUAGES:
             r = _fetch_google_rss_fallback(query, days_back, lang)
@@ -434,7 +436,7 @@ def fetch_newsapi_multilang(query, days_back=7):
     # NewsAPI 仅查询 en
     en_result = _fetch_newsapi_single_lang(query, days_back, "en", api_key)
     if en_result:
-        print(f"   ✅ NewsAPI [en] 轨道命中 {en_result['text'].count('[线索 #')} 条")
+        logger.info(f"   ✅ NewsAPI [en] 轨道命中 {en_result['text'].count('[线索 #')} 条")
 
     # RSS 多语言补充（始终运行，作为 zh/id 覆盖 + en 补充）
     rss_results = []
@@ -515,10 +517,11 @@ def generate_queries_from_matrix(matrix_config, max_keywords_per_query=8):
 _llm_client = None
 
 def _get_llm_client():
-    """获取全局 CachedLLMClient 单例"""
+    """获取全局 CachedLLMClient 单例，基于 radar_infra.llm"""
     global _llm_client
     if _llm_client is None:
-        _llm_client = get_cached_client()
+        provider = DeepSeekProvider()
+        _llm_client = CachedLLMClient(provider)
     return _llm_client
 
 def discover_hotspots(max_count=5):
@@ -542,20 +545,19 @@ def discover_hotspots(max_count=5):
         f'请以 JSON 格式返回，格式如下：{{"queries": ["query1", "query2", ...]}}'
     )
     try:
-        response = client.chat_completion(
+        content = client.chat_completion(
             task_type="hotspot_discovery",
             model="deepseek-v4-pro",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0.7,
         )
-        content = response.choices[0].message.content
         if content:
             data = json.loads(content)
             queries = data.get("queries", []) if isinstance(data, dict) else []
             return [q for q in queries[:max_count] if isinstance(q, str) and len(q) > 5]
     except Exception as e:
-        print(f"⚠️ 自适应热点发现失败，已回退纯矩阵模式: {e}")
+        logger.warning(f"⚠️ 自适应热点发现失败，已回退纯矩阵模式: {e}")
     return []
 
 
@@ -663,23 +665,26 @@ def extract_macro_policy(raw_text, schema_dict, baseline_injection=""):
         {"role": "system", "content": baseline_injection},
         {"role": "user", "content": f"请对以下原生文本进行过滤与地缘战略推演：\n\n{raw_text}"},
     ]
-    try:
-        response = client.chat_completion(
+
+    @create_llm_retry_decorator(max_attempts=3)
+    def _do_extract():
+        return client.chat_completion(
             task_type="policy_extraction",
             model="deepseek-v4-pro",
             messages=messages,
             response_format={"type": "json_object"},
-            temperature=0.0,  # v5.0: 确定性输出 → 提升 DeepSeek 服务端 + 本地缓存命中率
-            timeout=60,
+            temperature=0.0,
         )
-        content = response.choices[0].message.content
+
+    try:
+        content = _do_extract()
         if content is None:
-            print("❌ DeepSeek 返回了空内容")
+            logger.error("DeepSeek 返回了空内容")
             return None
         result = json.loads(content)
         return _normalize_v50(result)
     except Exception as e:
-        print(f"❌ DeepSeek 提炼异常: {str(e)}")
+        logger.error(f"DeepSeek 提炼异常: {str(e)}")
         return None
 
 
@@ -761,14 +766,6 @@ REGULATION_PATTERNS = [
     r"Public\s*Law\s*No",
 ]
 
-# 数字提取正则：百分比、金额、产能、税率
-# 用于在原文中建立"已知数字集合"，LLM 输出的数字若不在集合内 → 视为捏造
-_NUMBER_PATTERN = re.compile(
-    r"\d+(?:\.\d+)?\s*(?:%|％|亿|万|美元|USD|RMB|人民币|吨|千吨|百万吨|Mt|kt|吨/年)",
-    flags=re.IGNORECASE,
-)
-
-
 def _has_regulation_reference(text):
     """检查文本中是否出现法规编号（用于推送闸门 2 的兜底判定）"""
     if not text:
@@ -838,35 +835,10 @@ def _should_push(data, fetched_text="", source_depth="shallow", is_new_document=
     return False, f"已知文件的常规报道（类型={article_type}, 烈度={impact}），仅入库"
 
 
-def _sanitize_fabricated_numbers(data, fetched_text):
-    """
-    【v4.0 数字净化 · 兜底防线】在 LLM 返回后、入库前调用。
-    扫描 substantive_provisions / impact_deduction 中的数字，若原文未出现 → 标记 ⚠️(待核)。
-
-    返回净化后的 data（原地修改 + 返回引用）。同时记录日志便于复盘。
-    """
+def _apply_number_sanitizer(data, fetched_text):
+    """数字净化兜底（基于 radar_infra.guard.sanitize_numbers）。"""
     if not fetched_text:
-        return data
-
-    # 原文中实际出现的数字集合
-    source_numbers = set(m.group(0).strip() for m in _NUMBER_PATTERN.finditer(fetched_text))
-
-    def _scrub(text):
-        if not text:
-            return text, 0
-        flagged = 0
-
-        def _check(m):
-            nonlocal flagged
-            token = m.group(0).strip()
-            if token in source_numbers:
-                return m.group(0)
-            # 原文没有这个数字 → 标记
-            flagged += 1
-            return f"⚠️{m.group(0)}(待核)"
-
-        cleaned = _NUMBER_PATTERN.sub(_check, text)
-        return cleaned, flagged
+        return
 
     pd = data.get("policy_dynamics", {}) or {}
     si = data.get("strategic_implications", {}) or {}
@@ -875,27 +847,24 @@ def _sanitize_fabricated_numbers(data, fetched_text):
     deduction_flagged = 0
 
     if pd.get("substantive_provisions"):
-        cleaned, provisions_flagged = _scrub(pd["substantive_provisions"])
+        cleaned, provisions_flagged = sanitize_numbers(pd["substantive_provisions"], fetched_text)
         if provisions_flagged:
             pd["substantive_provisions"] = cleaned
 
     if si.get("impact_deduction"):
-        cleaned, deduction_flagged = _scrub(si["impact_deduction"])
+        cleaned, deduction_flagged = sanitize_numbers(si["impact_deduction"], fetched_text)
         if deduction_flagged:
             si["impact_deduction"] = cleaned
 
     total = provisions_flagged + deduction_flagged
     if total > 0:
-        print(
-            f"🛡️ [数字净化] 检出 {total} 处疑似捏造数字 "
-            f"(条款 {provisions_flagged} / 研判 {deduction_flagged})，已标记 ⚠️待核。"
+        logger.warning(
+            f"数字净化: 检出 {total} 处疑似捏造数字 "
+            f"(条款 {provisions_flagged} / 研判 {deduction_flagged})，已标记待核。"
         )
-        # 在研判末尾追加溯源警示
         warning = "\n\n⚠️【系统警示】以上含(待核)标记的数字未在原文中出现，系分析师估算或模型生成，请人工核实。"
         si["impact_deduction"] = (si.get("impact_deduction") or "") + warning
         data["_numbers_flagged"] = total
-
-    return data
 
 
 # =============================================================================
@@ -954,7 +923,7 @@ def _notion_search_pages(official_name, fallback_name=""):
                 return True, results[0]["id"]
         return False, None
     except Exception as e:
-        print(f"   ⚠️ Notion 去重查询异常: {e}")
+        logger.warning(f"   ⚠️ Notion 去重查询异常: {e}")
         return False, None
 
 
@@ -1015,6 +984,11 @@ def _notion_update_policy(page_id, data, source_url):
     if provisions_text:
         properties["要点摘要"] = {"rich_text": [{"text": {"content": provisions_text[:300]}}]}
     issuing_authority = md.get("issuing_authority", "")
+    if not issuing_authority:
+        doc_type = pd.get("document_type", "")
+        issuing_authority = _derive_authority_heuristic(
+            pd.get("policy_name_original", ""), pd.get("policy_name_zh", ""), country_code, doc_type
+        )
     if issuing_authority:
         properties["发布机构"] = {"rich_text": [{"text": {"content": issuing_authority}}]}
 
@@ -1057,7 +1031,7 @@ def _notion_update_policy(page_id, data, source_url):
     try:
         res = requests.patch(url, headers=headers, json=payload, timeout=10)
         if res.status_code == 200:
-            print("🔄 [Notion] 检测到重复政策，已执行增量更新（阶段/条款/烈度）。")
+            logger.info("🔄 [Notion] 检测到重复政策，已执行增量更新（阶段/条款/烈度）。")
             return True
 
         err_text = res.text[:500]
@@ -1070,15 +1044,15 @@ def _notion_update_policy(page_id, data, source_url):
                 payload["properties"] = stripped
                 res2 = requests.patch(url, headers=headers, json=payload, timeout=10)
                 if res2.status_code == 200:
-                    print("🔄 [Notion] 检测到重复政策，已执行增量更新（自动跳过数据库缺失字段）。")
+                    logger.info("🔄 [Notion] 检测到重复政策，已执行增量更新（自动跳过数据库缺失字段）。")
                     return True
-                print(f"   ⚠️ [Notion] 重试后仍失败，状态码: {res2.status_code}")
+                logger.warning(f"   ⚠️ [Notion] 重试后仍失败，状态码: {res2.status_code}")
                 return False
 
-        print(f"   ⚠️ [Notion] 增量更新失败，状态码: {res.status_code}")
+        logger.warning(f"   ⚠️ [Notion] 增量更新失败，状态码: {res.status_code}")
         return False
     except Exception as e:
-        print(f"   ❌ [Notion] 更新连接异常: {str(e)}")
+        logger.error(f"   ❌ [Notion] 更新连接异常: {str(e)}")
         return False
 
 
@@ -1157,13 +1131,13 @@ def _notion_append_news(page_id, data, source_url, article_type):
         url = f"https://api.notion.com/v1/pages/{page_id}"
         res = requests.patch(url, headers=headers, json=payload, timeout=10)
         if res.status_code == 200:
-            print(f"📎 [Notion] 已追加{article_label}到已有文件（关联报道数: {current_count + 1}）")
+            logger.info(f"📎 [Notion] 已追加{article_label}到已有文件（关联报道数: {current_count + 1}）")
             return True
         else:
-            print(f"   ⚠️ [Notion] 追加报道失败，状态码: {res.status_code}")
+            logger.warning(f"   ⚠️ [Notion] 追加报道失败，状态码: {res.status_code}")
             return False
     except Exception as e:
-        print(f"   ❌ [Notion] 追加报道连接异常: {str(e)}")
+        logger.error(f"   ❌ [Notion] 追加报道连接异常: {str(e)}")
         return False
 
 
@@ -1240,15 +1214,13 @@ def _semantic_diff(page_id, new_data):
     ]
 
     try:
-        response = client.chat_completion(
+        content = client.chat_completion(
             task_type="semantic_diff",
             model="deepseek-v4-pro",
             messages=messages,
             response_format={"type": "json_object"},
             temperature=0.0,
-            timeout=30,
         )
-        content = response.choices[0].message.content
         if content:
             result = json.loads(content)
             return {
@@ -1256,7 +1228,7 @@ def _semantic_diff(page_id, new_data):
                 "change_summary": result.get("change_summary", ""),
             }
     except Exception as e:
-        print(f"   ⚠️ 语义 Diff 异常: {e}")
+        logger.warning(f"   ⚠️ 语义 Diff 异常: {e}")
 
     return {"has_material_change": True, "change_summary": "Diff 失败，保守推送"}
 
@@ -1293,6 +1265,50 @@ def _sync_baselines_to_notion(yaml_path):
         "Administrative_Order": "行政令 Admin_Order",
     }
 
+    # v5.2: 基线种子颁布机构推导（基于国家+文件类型）
+    def _derive_seed_authority(country, official_name, doc_type):
+        if country == "GLOBAL":
+            if "IRMA" in official_name:
+                return "负责任采矿保障倡议 (Initiative for Responsible Mining Assurance)"
+            if "RMAP" in official_name or "Risk Management" in official_name:
+                return "负责任矿产倡议 (Responsible Minerals Initiative, RMI)"
+            if "Nickel Mark" in official_name:
+                return "镍协会 (Nickel Institute)"
+            if "Copper Mark" in official_name:
+                return "铜标记组织 (Copper Mark)"
+            return ""
+        if country == "EU":
+            if doc_type in ("Regulation", "Directive"):
+                return "欧洲议会与欧盟理事会 (European Parliament and Council)"
+            return "欧盟委员会 (European Commission)"
+        if country == "CN":
+            if doc_type == "Law":
+                return "全国人民代表大会常务委员会"
+            return "中华人民共和国国务院"
+        if country == "ID":
+            if doc_type == "Law":
+                return "印度尼西亚共和国国会 (Dewan Perwakilan Rakyat)"
+            if "ESDM" in official_name or "RKAB" in official_name:
+                return "印尼能源与矿产资源部 (Kementerian ESDM)"
+            return "印度尼西亚共和国政府 (Pemerintah Indonesia)"
+        if country == "US":
+            return "美国国会 (U.S. Congress)"
+        if country == "CD":
+            return "刚果（金）矿业部 (Ministère des Mines, RDC)"
+        if country == "CL":
+            return "智利矿业部 (Ministerio de Minería de Chile)"
+        if country == "AU":
+            return "澳大利亚工业、科学与资源部 (DISR)"
+        if country == "PH":
+            return "菲律宾共和国国会 (Congress of the Philippines)"
+        if country == "ZW":
+            return "津巴布韦矿业与矿业发展部"
+        if country == "GH":
+            return "加纳共和国政府 (Government of Ghana)"
+        if country == "AR":
+            return "阿根廷共和国政府 (Gobierno de Argentina)"
+        return ""
+
     created = 0
     baselines = config.get("baselines", {})
     for country_code, entry in baselines.items():
@@ -1309,18 +1325,24 @@ def _sync_baselines_to_notion(yaml_path):
             if exists:
                 continue
 
+            doc_type = doc.get("type", "Other")
+            authority = _derive_seed_authority(country_code, official_name, doc_type)
+
             # 构建 Notion 属性
             properties = {
                 "政策名称": {"title": [{"text": {"content": official_name[:200]}}]},
                 "原名及出处": {"rich_text": [{"text": {"content": f"中文：{doc.get('chinese_name', '')}\n简称：{doc.get('short_name', '')}"}}]},
+                "中文名称": {"rich_text": [{"text": {"content": doc.get('chinese_name', '') or doc.get('short_name', '')}}]},
                 "颁布国家": {"select": {"name": country_code}},
-                "文件类型": {"select": {"name": doc_type_map.get(doc.get("type", "Other"), "其他 Other")}},
+                "文件类型": {"select": {"name": doc_type_map.get(doc_type, "其他 Other")}},
                 "处理状态": {"status": {"name": "监测中"}},
                 "核心分类": {"select": {"name": "宏观地缘与产业政策"}},
                 "关联报道数": {"number": 0},
                 "已告警（钉钉）": {"checkbox": False},
                 "核心条款摘要": {"rich_text": [{"text": {"content": f"【基线种子 · 待事件填充】\n{doc.get('baseline', '')}"[:2000]}}]},
             }
+            if authority:
+                properties["发布机构"] = {"rich_text": [{"text": {"content": authority}}]}
 
             if doc.get("effective_date"):
                 properties["生效日期"] = {"date": {"start": doc["effective_date"]}}
@@ -1339,13 +1361,13 @@ def _sync_baselines_to_notion(yaml_path):
                     headers=headers, json=payload, timeout=10
                 )
                 if res.status_code == 200:
-                    print(f"  🌱 [基线种子] {doc.get('short_name', official_name[:50])}")
+                    logger.info(f"  🌱 [基线种子] {doc.get('short_name', official_name[:50])}")
                     created += 1
                 else:
                     err = res.json().get("message", res.text)[:100]
-                    print(f"  ⚠️ 种子失败 [{doc.get('short_name', '')}]: {err}")
+                    logger.warning(f"  ⚠️ 种子失败 [{doc.get('short_name', '')}]: {err}")
             except Exception as e:
-                print(f"  ⚠️ 种子异常 [{doc.get('short_name', '')}]: {e}")
+                logger.warning(f"  ⚠️ 种子异常 [{doc.get('short_name', '')}]: {e}")
 
     return created
 
@@ -1535,6 +1557,86 @@ def _enhance_policy_title(policy_name_zh, country, current_stage, mineral_types=
     return enhanced
 
 
+def _derive_authority_heuristic(official_name, chinese_name, country, document_type):
+    """
+    v5.2: 当 LLM 未提取 issuing_authority 时，从政策名称/国家/文件类型推导。
+    覆盖主流国家+文件类型的常见模式，作为 LLM 提取失败时的兜底。
+    """
+    text = f"{official_name} {chinese_name}"
+
+    # GLOBAL 标准组织
+    if country == "GLOBAL":
+        if "IRMA" in text:
+            return "负责任采矿保障倡议 (Initiative for Responsible Mining Assurance)"
+        if "RMAP" in text or "Risk Management" in text:
+            return "负责任矿产倡议 (Responsible Minerals Initiative, RMI)"
+        if "Nickel Mark" in text:
+            return "镍协会 (Nickel Institute)"
+        if "Copper Mark" in text:
+            return "铜标记组织 (Copper Mark)"
+        return ""
+
+    # 欧盟
+    if country == "EU":
+        if document_type in ("Regulation", "Directive"):
+            return "欧洲议会与欧盟理事会 (European Parliament and Council)"
+        return "欧盟委员会 (European Commission)"
+
+    # 中国
+    if country == "CN":
+        if "商务部" in text or "MOFCOM" in text or "商务" in text:
+            return "中华人民共和国商务部"
+        if "海关" in text:
+            return "中华人民共和国海关总署"
+        if "人大" in text or document_type == "Law":
+            return "全国人民代表大会常务委员会"
+        if "部" in text or "委" in text or "局" in text:
+            return "中华人民共和国国务院"
+        return "中华人民共和国国务院"
+
+    # 印尼
+    if country == "ID":
+        if document_type == "Law" or "Undang" in text or "UU" in text:
+            return "印度尼西亚共和国国会 (Dewan Perwakilan Rakyat)"
+        if "ESDM" in text or "RKAB" in text:
+            return "印尼能源与矿产资源部 (Kementerian ESDM)"
+        if "Kemendag" in text or "贸易" in text:
+            return "印尼贸易部 (Kementerian Perdagangan)"
+        return "印度尼西亚共和国政府 (Pemerintah Indonesia)"
+
+    # 美国
+    if country == "US":
+        if "Presidential" in text or "Proclamation" in text:
+            return "美国白宫 (The White House)"
+        if "Final Rule" in text:
+            return "美国财政部/国税局 (U.S. Treasury / IRS)"
+        if document_type == "Law" or "Act" in text:
+            return "美国国会 (U.S. Congress)"
+        return "美国政府"
+
+    # 刚果（金）
+    if country == "CD":
+        return "刚果（金）矿业部 (Ministère des Mines, RDC)"
+
+    # 智利
+    if country == "CL":
+        return "智利矿业部 (Ministerio de Minería de Chile)"
+
+    # 澳大利亚
+    if country == "AU":
+        return "澳大利亚工业、科学与资源部 (DISR)"
+
+    # 其他国家
+    _country_fallback = {
+        "PH": "菲律宾共和国国会 (Congress of the Philippines)",
+        "ZW": "津巴布韦矿业与矿业发展部",
+        "GH": "加纳共和国政府 (Government of Ghana)",
+        "AR": "阿根廷共和国政府 (Gobierno de Argentina)",
+        "JP": "日本国政府",
+    }
+    return _country_fallback.get(country, "")
+
+
 def insert_to_notion(data, source_url):
     """
     【持久化沉淀 v3.1】将结构化情报写入 Notion 数据库。
@@ -1544,7 +1646,7 @@ def insert_to_notion(data, source_url):
     database_id = os.environ.get("NOTION_DATABASE_ID")
 
     if not notion_token or not database_id or notion_token == "disabled":
-        print("ℹ️ 暂未配置 Notion 凭证，跳过数据库沉淀阶段。")
+        logger.info("ℹ️ 暂未配置 Notion 凭证，跳过数据库沉淀阶段。")
         return {"is_new": False, "page_id": None}
 
     pd = data["policy_dynamics"]
@@ -1599,6 +1701,7 @@ def insert_to_notion(data, source_url):
     properties = {
         "政策名称":     {"title":       [{"text": {"content": wiki_title}}]},
         "原名及出处":   {"rich_text":   [{"text": {"content": display_title}}]},
+        "中文名称":     {"rich_text":   [{"text": {"content": chinese_name if chinese_name else wiki_title}}]},
         "核心分类":     {"select":      {"name": data["notion_integration"]["master_tag"]}},
         "颁布国家":     {"select":      {"name": country_code}},
         "当前阶段":     {"select":      {"name": pd["current_stage"]}},
@@ -1644,8 +1747,10 @@ def insert_to_notion(data, source_url):
     if provisions_text:
         properties["要点摘要"] = {"rich_text": [{"text": {"content": provisions_text[:300]}}]}
 
-    # 发布机构（v4.5: 修复字段名 — DB 中是"发布机构"不是"颁布机构"）
+    # 发布机构（v5.2: 优先 LLM 提取，空则启发式推导兜底）
     issuing_authority = md.get("issuing_authority", "")
+    if not issuing_authority:
+        issuing_authority = _derive_authority_heuristic(wiki_title, chinese_name, country_code, document_type)
     if issuing_authority:
         properties["发布机构"] = {"rich_text": [{"text": {"content": issuing_authority}}]}
 
@@ -1700,7 +1805,7 @@ def insert_to_notion(data, source_url):
 
     if data.get("_review_flag") and not data.get("_stale_flag"):
         properties["处理状态"] = {"status": {"name": "待评估"}}
-        print("📝 [待核] 已标记为「待评估」状态，入库后需人工复核。")
+        logger.info("📝 [待核] 已标记为「待评估」状态，入库后需人工复核。")
 
     # v4.4: 生效日期
     effective_date = (pd.get("effective_date") or "").strip()
@@ -1755,7 +1860,7 @@ def insert_to_notion(data, source_url):
             return {"is_new": True, "page_id": res_page_id}
         return {"is_new": False, "page_id": None}
     except Exception as e:
-        print(f"❌ [Notion] 连接异常: {str(e)}")
+        logger.error(f"❌ [Notion] 连接异常: {str(e)}")
         return {"is_new": False, "page_id": None}
 
 
@@ -1764,7 +1869,7 @@ def _notion_api_post(url, headers, payload, retry_stripping=True):
     import re
     res = requests.post(url, headers=headers, json=payload, timeout=10)
     if res.status_code == 200:
-        print("🚀 [Notion] 成功打标并持久化沉淀至高管数据库看板。")
+        logger.info("🚀 [Notion] 成功打标并持久化沉淀至高管数据库看板。")
         return res.json().get("id", "")
 
     err_text = res.text[:500]
@@ -1786,10 +1891,10 @@ def _notion_api_post(url, headers, payload, retry_stripping=True):
                     b for b in payload.get("children", [])
                     if b.get("type") != "heading_2" or "产业基线" not in str(b.get("heading_2", {}).get("rich_text", [{}])[0].get("text", {}).get("content", ""))
                 ]
-            print(f"⚠️ [Notion] 数据库缺少字段: {', '.join(removed)}，已自动移除后重试。")
+            logger.warning(f"⚠️ [Notion] 数据库缺少字段: {', '.join(removed)}，已自动移除后重试。")
             return _notion_api_post(url, headers, payload, retry_stripping=False)
 
-    print(f"⚠️ [Notion] 写入失败，状态码: {res.status_code}, 详情: {err_text}")
+    logger.warning(f"⚠️ [Notion] 写入失败，状态码: {res.status_code}, 详情: {err_text}")
     return False
 
 
@@ -1819,28 +1924,11 @@ def _fmt_provisions(text):
 
 
 def send_dingtalk_digest(policies):
-    """
-    【v3.5 汇总简报】将本轮所有通过门控的政策合并为单条钉钉摘要卡片。
-    按冲击烈度排序（High_Disruption 优先），区块间用分隔线隔开。
-    单条超过 4500 字时分片推送，每片标注 (第 x/N 片)。
-    """
+    """将本轮所有通过门控的政策合并为单条钉钉摘要卡片（基于 radar_infra.sink.send_dingtalk）。"""
     webhook_url = os.environ.get("DINGTALK_WEBHOOK")
     if not webhook_url or webhook_url == "disabled":
-        print("ℹ️ 暂未配置钉钉 Webhook，跳过告警触达阶段。")
+        logger.info("暂未配置钉钉 Webhook，跳过告警触达阶段。")
         return
-
-    # 加签模式
-    dingtalk_secret = os.environ.get("DINGTALK_SECRET")
-    if dingtalk_secret:
-        timestamp = str(round(time.time() * 1000))
-        string_to_sign = f"{timestamp}\n{dingtalk_secret}"
-        hmac_code = hmac.new(
-            dingtalk_secret.encode("utf-8"),
-            string_to_sign.encode("utf-8"),
-            digestmod=hashlib.sha256,
-        ).digest()
-        sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
-        webhook_url = f"{webhook_url}&timestamp={timestamp}&sign={sign}"
 
     # 按冲击烈度排序：High_Disruption 在前
     impact_order = {"High_Disruption": 0, "Moderate_Adjustment": 1, "Low_Monitoring": 2}
@@ -1852,11 +1940,6 @@ def send_dingtalk_digest(policies):
     )
 
     n = len(policies_sorted)
-    impact_emoji = {
-        "High_Disruption": "🔴🔴",
-        "Moderate_Adjustment": "🟡",
-        "Low_Monitoring": "🟢",
-    }
 
     # v5.1: 精简卡片——entity + event_summary + impact + source
     blocks = []
@@ -1866,7 +1949,6 @@ def send_dingtalk_digest(policies):
         md_data = data.get("metadata", {}) or {}
         si_data = data.get("strategic_implications", {}) or {}
 
-        # 分类标签
         ec = event.get("event_classification", "")
         alert_label = "🆕 新政策出台" if ec == "New_Policy_Issuance" else "🔄 法案重大推进"
 
@@ -1887,35 +1969,12 @@ def send_dingtalk_digest(policies):
     header = f"### 📡 宏观政策雷达 · 本期 {n} 条预警"
     full_text = f"{header}\n\n{combined_body}\n\n━━━\n📋 已同步存入 Notion 情报资产库。全文时间轴请查看对应文件页面。"
 
-    # 分片保护：钉钉 markdown 单条约 5000 字，保守按 4500 截断
-    MAX_CHUNK = 4500
-    headers_common = {"Content-Type": "application/json"}
-
-    def post_markdown(text, chunk_idx, total_chunks):
-        suffix = f"\n\n> 📄 第 {chunk_idx}/{total_chunks} 片" if total_chunks > 1 else ""
-        payload = {
-            "msgtype": "markdown",
-            "markdown": {
-                "title": f"📡 宏观政策雷达 · 第 {chunk_idx} 片",
-                "text": text + suffix
-            }
-        }
-        try:
-            res = requests.post(webhook_url, headers=headers_common, json=payload, timeout=10)
-            if res.status_code == 200:
-                print(f"🔔 [钉钉] 摘要推送成功（第 {chunk_idx}/{total_chunks} 片）。")
-            else:
-                print(f"⚠️ [钉钉] 推送失败（第 {chunk_idx}/{total_chunks} 片），详情: {res.text[:200]}")
-        except Exception as e:
-            print(f"❌ [钉钉] 推送异常（第 {chunk_idx}/{total_chunks} 片）: {str(e)}")
-
-    if len(full_text) <= MAX_CHUNK:
-        post_markdown(full_text, 1, 1)
-    else:
-        total_chunks = (len(full_text) + MAX_CHUNK - 1) // MAX_CHUNK
-        for ci in range(total_chunks):
-            chunk = full_text[ci * MAX_CHUNK : (ci + 1) * MAX_CHUNK]
-            post_markdown(chunk, ci + 1, total_chunks)
+    send_dingtalk(
+        webhook_url=webhook_url,
+        markdown_text=full_text,
+        title="📡 宏观政策雷达",
+        secret=os.environ.get("DINGTALK_SECRET"),
+    )
 
 
 # =============================================================================
@@ -1932,15 +1991,15 @@ if __name__ == "__main__":
         os.path.join(PROJECT_DIR, "knowledge_baselines.yaml")
     )
 
-    print(f"📡 数字化情报网络就绪。当前天网总线共挂载 {len(all_active_sources)} 个探测节点。")
-    print(f"🌐 NewsAPI: {', '.join(NEWSAPI_LANGUAGES)} | RSS 兜底: {', '.join(RSS_FALLBACK_LANGUAGES)}")
-    print(f"🛡️ 熔断配置: 最大AI调用={MAX_AI_CALLS} | 连续空转上限={MAX_CONSECUTIVE_EMPTY} | 最小文本长度={MIN_TEXT_LENGTH}")
-    print(f"📚 基线知识库已加载，覆盖 {len(baselines)} 个国家，最后更新: {baseline_updated}")
+    logger.info(f"📡 数字化情报网络就绪。当前天网总线共挂载 {len(all_active_sources)} 个探测节点。")
+    logger.info(f"🌐 NewsAPI: {', '.join(NEWSAPI_LANGUAGES)} | RSS 兜底: {', '.join(RSS_FALLBACK_LANGUAGES)}")
+    logger.info(f"熔断配置: 最大AI调用={MAX_AI_CALLS} | 连续空转上限={MAX_CONSECUTIVE_EMPTY} | 最小文本长度={MIN_TEXT_LENGTH}")
+    logger.info(f"📚 基线知识库已加载，覆盖 {len(baselines)} 个国家，最后更新: {baseline_updated}")
 
     # v5.0: 同步基线政策文件实体到 Notion（种子容器）
     synced = _sync_baselines_to_notion(os.path.join(PROJECT_DIR, "knowledge_baselines.yaml"))
     if synced:
-        print(f"🌱 [基线同步] 本次新创建 {synced} 个政策文件容器。")
+        logger.info(f"🌱 [基线同步] 本次新创建 {synced} 个政策文件容器。")
 
     # v4.3: 基线覆盖率交叉校验
     source_countries = {s["country"] for s in all_active_sources if s.get("country") != "GLOBAL"}
@@ -1948,30 +2007,28 @@ if __name__ == "__main__":
     missing_baseline = source_countries - baseline_countries
     unused_baseline = baseline_countries - source_countries
     if missing_baseline:
-        print(f"⚠️ [基线缺口] {len(missing_baseline)} 国有情报源但无基线: {sorted(missing_baseline)}")
-        print(f"   → 编辑 knowledge_baselines.yaml 补全，否则这些国家的研判将无常识锚。")
+        logger.warning(f"⚠️ [基线缺口] {len(missing_baseline)} 国有情报源但无基线: {sorted(missing_baseline)}")
+        logger.info(f"   → 编辑 knowledge_baselines.yaml 补全，否则这些国家的研判将无常识锚。")
     if unused_baseline:
-        print(f"ℹ️ [待接源] {len(unused_baseline)} 个基线国家暂无情报源: {sorted(unused_baseline)}")
+        logger.info(f"ℹ️ [待接源] {len(unused_baseline)} 个基线国家暂无情报源: {sorted(unused_baseline)}")
 
-    ai_call_count = 0
-    consecutive_empty = 0
-    last_empty_feed_type = None
+    cb = CircuitBreaker(max_consecutive_empty=MAX_CONSECUTIVE_EMPTY, max_ai_calls=MAX_AI_CALLS)
 
     # v3.5: 收集本轮所有通过门控的政策，循环结束后合并为单条摘要推送
     pending_alerts = []
 
     # v5.1: 按国家分组排序 → 同国源连续处理 → DeepSeek Context Cache 前缀复用最大化
     all_active_sources.sort(key=lambda s: s.get("country", "GLOBAL"))
-    print(f"🔀 [缓存优化] 情报源已按国家分组排序，最大化 Context Cache 前缀复用。")
+    logger.info(f"🔀 [缓存优化] 情报源已按国家分组排序，最大化 Context Cache 前缀复用。")
 
     for source in all_active_sources:
         source_notes = source.get("notes", "")
         notes_suffix = f" [📝 {source_notes}]" if source_notes else ""
-        print(f"\n🚀 [正在扫描] 目标：{source['agency']} ({source['country']}){notes_suffix}...")
+        logger.info(f"\n🚀 [正在扫描] 目标：{source['agency']} ({source['country']}){notes_suffix}...")
 
         # ---- v3.3 熔断：连续空转检测 ----
-        if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
-            print(f"🛑 [熔断] 连续 {consecutive_empty} 个节点无有效政策，跳过后续 node。")
+        if cb.check_empty(source.get("feed_type", "")):
+            logger.warning(f"熔断: 连续 {cb.consecutive_empty} 个节点无有效政策，跳过后续 node。")
             break
 
         source_url = source.get("url", "")
@@ -2003,25 +2060,19 @@ if __name__ == "__main__":
 
         if not fetched_text or len(fetched_text) < MIN_TEXT_LENGTH:
             if fetched_text is None:
-                print(f"ℹ️ 该节点未捕获到有效内容（网络超时或选择器无匹配）。")
+                logger.info(f"ℹ️ 该节点未捕获到有效内容（网络超时或选择器无匹配）。")
             else:
-                print(f"ℹ️ 该节点内容过短（{len(fetched_text)} 字符），跳过 AI 调用。")
+                logger.info(f"ℹ️ 该节点内容过短（{len(fetched_text)} 字符），跳过 AI 调用。")
 
-            # 连续空转计数
-            ft = source.get("feed_type", "")
-            if ft == last_empty_feed_type:
-                consecutive_empty += 1
-            else:
-                consecutive_empty = 1
-                last_empty_feed_type = ft
+            cb.record_empty(source.get("feed_type", ""))
             continue
 
         # ---- v3.3 熔断：AI 调用次数上限 ----
-        if MAX_AI_CALLS > 0 and ai_call_count >= MAX_AI_CALLS:
-            print(f"🛑 [熔断] 已达本轮 AI 调用上限 ({MAX_AI_CALLS})，跳过后续分析与入库。")
+        if cb.check_ai_limit():
+            logger.warning(f"熔断: 已达本轮 AI 调用上限 ({MAX_AI_CALLS})，跳过后续分析与入库。")
             break
 
-        print(f"📥 [成功捕获] 原始线索已入流 ({len(fetched_text)} 字符)。正在调动 DeepSeek 进行矩阵式交叉研判...")
+        logger.info(f"📥 [成功捕获] 原始线索已入流 ({len(fetched_text)} 字符)。正在调动 DeepSeek 进行矩阵式交叉研判...")
 
         # v3.5: 前置年份预扫 —— 轻量正则提取文中所有四位年份，标记疑似旧文
         _years_in_text = [int(y) for y in re.findall(r'\b(19\d{2}|20[0-2]\d)\b', fetched_text)]
@@ -2029,7 +2080,7 @@ if __name__ == "__main__":
         _current_year = datetime.now().year
         is_likely_old = (_max_year is not None and _max_year <= _current_year - 1)
         if is_likely_old:
-            print(f"   ⚠️ [预扫] 文本中最高年份为 {_max_year} → 疑似历史回顾文章，后续将交叉校验。")
+            logger.warning(f"   ⚠️ [预扫] 文本中最高年份为 {_max_year} → 疑似历史回顾文章，后续将交叉校验。")
 
         # v5.1: 基线注入作为独立 system 消息传入（不再拼入 fetched_text）
         # → DeepSeek Context Cache 可跨调用复用基线前缀
@@ -2037,22 +2088,22 @@ if __name__ == "__main__":
         baseline_injection = _inject_baseline(source_country, baselines, baseline_updated)
 
         analysis_result = extract_macro_policy(fetched_text, schema, baseline_injection)
-        ai_call_count += 1
+        cb.record_ai_call()
 
         if analysis_result:
             # v3.1: 校验 DeepSeek 返回的 JSON 是否包含所有必需字段，防止 KeyError 崩溃
             required_keys = ["metadata", "policy_dynamics", "strategic_implications", "notion_integration"]
             missing = [k for k in required_keys if k not in analysis_result]
             if missing:
-                print(f"⚠️ DeepSeek 返回 JSON 缺少关键字段: {missing}，跳过本条。")
-                consecutive_empty += 1
+                logger.warning(f"⚠️ DeepSeek 返回 JSON 缺少关键字段: {missing}，跳过本条。")
+                cb.record_empty(source.get("feed_type", ""))
                 continue
 
             # ---- v3.5 噪音粉碎：最高优先级杀伤开关 ----
             # LLM 明确判定为无效输入（网页导航/无关新闻/纯内政），直接丢弃
             if analysis_result.get("is_valid_macro_policy") is False:
-                print("🗑️ [噪音粉碎] 网页导航/无关新闻/纯内政措施，已直接丢弃。")
-                consecutive_empty += 1
+                logger.info("🗑️ [噪音粉碎] 网页导航/无关新闻/纯内政措施，已直接丢弃。")
+                cb.record_empty(source.get("feed_type", ""))
                 continue
 
             # v3.1: 噪音过滤 — 跳过 DeepSeek 返回的"无政策"结果
@@ -2072,19 +2123,18 @@ if __name__ == "__main__":
                 "无明确", "无可提取", "不适用",
             ]
             if any(p in name_zh for p in noise_patterns):
-                print(f"ℹ️ DeepSeek 判定为无宏观政策（{name_zh}），已过滤。")
-                consecutive_empty += 1
+                logger.info(f"ℹ️ DeepSeek 判定为无宏观政策（{name_zh}），已过滤。")
+                cb.record_empty(source.get("feed_type", ""))
                 continue
 
             # ---- v4.2: Historical_Noise 拦截 —— 历史旧规复述直接丢弃 ----
             if pd.get("current_stage") == "Historical_Noise":
-                print(f"🛡️ [防噪熔断] 识别到历史旧规复述（无增量情报），直接丢弃。")
-                consecutive_empty += 1
+                logger.info(f"🛡️ [防噪熔断] 识别到历史旧规复述（无增量情报），直接丢弃。")
+                cb.record_empty(source.get("feed_type", ""))
                 continue
 
             # 有效政策 → 重置空转计数
-            consecutive_empty = 0
-            last_empty_feed_type = None
+            cb.reset_empty()
 
             # ---- v3.5: 第二道防线 — LLM 时效性校验 + 年份交叉验证 ----
             nrv = analysis_result.get("news_recency_verification", {})
@@ -2102,7 +2152,7 @@ if __name__ == "__main__":
                 if not is_recent: reason.append("LLM判定非近期政策")
                 if year_conflict: reason.append(f"年份矛盾(声称={declared_year})")
                 if is_likely_old: reason.append(f"预扫旧年份(max={_max_year})")
-                print(f"🛡️ [时效性熔断] {', '.join(reason)} → 降为 Low_Monitoring，仅入库不推送。")
+                logger.info(f"🛡️ [时效性熔断] {', '.join(reason)} → 降为 Low_Monitoring，仅入库不推送。")
 
             # v3.4: 优先使用 AI 从原文中提取的政策全文链接，fallback 到源地址
             # v3.5: AI 吐出的链接若仍是 Google News 跳转链，也解码一遍
@@ -2110,17 +2160,17 @@ if __name__ == "__main__":
             if ai_source_url and ai_source_url.startswith("http"):
                 source_url = resolve_google_news_url(ai_source_url)
 
-            print(f"🎉 战略情报研判完成。")
+            logger.info(f"🎉 战略情报研判完成。")
 
             # ---- v4.0: 数字净化兜底（LLM 返回后、入库前） ----
-            analysis_result = _sanitize_fabricated_numbers(analysis_result, fetched_text)
+            _apply_number_sanitizer(analysis_result, fetched_text)
 
             # ---- v4.2: 范式转移检测（基线失效雷达） ----
             si_check = analysis_result.get("strategic_implications", {}) or {}
             if si_check.get("baseline_shift_detected") is True:
-                print("🚨🚨🚨 [范式转移侦测] DeepSeek 研判最新情报已打破历史基线！")
-                print("   请维护人员核实 knowledge_baselines.yaml 是否需要更新。")
-                print("   若确认为范式转移，请编辑 YAML 并更新 last_updated 时间戳。")
+                logger.info("🚨🚨🚨 [范式转移侦测] DeepSeek 研判最新情报已打破历史基线！")
+                logger.info("   请维护人员核实 knowledge_baselines.yaml 是否需要更新。")
+                logger.info("   若确认为范式转移，请编辑 YAML 并更新 last_updated 时间戳。")
                 analysis_result["_paradigm_shift"] = True
 
             # ---- v4.0: 待核标记 ----
@@ -2144,9 +2194,9 @@ if __name__ == "__main__":
                 material_change = _semantic_diff(page_id, analysis_result)
                 analysis_result["_material_change"] = material_change
                 if material_change.get("has_material_change"):
-                    print(f"🔍 [语义Diff] 检测到质变：{material_change.get('change_summary', '')[:80]}")
+                    logger.info(f"🔍 [语义Diff] 检测到质变：{material_change.get('change_summary', '')[:80]}")
                 else:
-                    print(f"🔇 [语义Diff] 无质变，MUTE。")
+                    logger.info(f"🔇 [语义Diff] 无质变，MUTE。")
 
             # ---- v4.5: 文档生命周期推送判定 ----
             should_push, push_reason = _should_push(
@@ -2156,16 +2206,16 @@ if __name__ == "__main__":
 
             if should_push:
                 pending_alerts.append((analysis_result, source_url))
-                print(f"🚨 [推送] {push_reason}")
+                logger.warning(f"🚨 [推送] {push_reason}")
             else:
-                print(f"🤫 [静默入库] {push_reason}")
+                logger.info(f"🤫 [静默入库] {push_reason}")
 
     # ---- v3.5: 汇总推送 ----
     if pending_alerts:
-        print(f"\n📬 本轮共 {len(pending_alerts)} 条政策通过研判，正在汇总为单条摘要推送...")
+        logger.info(f"\n📬 本轮共 {len(pending_alerts)} 条政策通过研判，正在汇总为单条摘要推送...")
         send_dingtalk_digest(pending_alerts)
     else:
-        print("\nℹ️ 本轮无政策达到钉钉推送阈值。")
+        logger.info("\nℹ️ 本轮无政策达到钉钉推送阈值。")
 
     # v5.0: 输出缓存命中统计
     _get_llm_client().print_stats()

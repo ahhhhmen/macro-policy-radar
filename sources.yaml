@@ -61,7 +61,7 @@ query_matrix:
 # ---- 第 3 层：自适应热点发现（方案 B — 已启用）----
 adaptive_discovery:
   enabled: true       # v3.1: 开启，每周借助 DeepSeek 生成当周前沿查询
-  max_hotspots: 5     # 每次最多补充 N 条动态查询
+  max_hotspots: 10    # 每次最多补充 N 条动态查询
 
 # ---- 第 1 层：静态靶向源（官方网页，一锤定音）----
 macro_sources:
@@ -93,6 +93,15 @@ macro_sources:
     notes: "印尼矿产下游化（Hilirisasi）与投资政策统筹机构"
 
   # ---- 中国 ----
+  - id: "cn_broad_newsapi_zh"
+    country: "CN"
+    agency: "中国矿产政策-NewsAPI中文宽泛扫描"
+    feed_type: "newsapi"
+    query: '"关键矿产" OR "稀土" OR "钴" OR "镍" OR "锂矿" OR "石墨" OR "铜" (出口 OR 管制 OR 关税 OR 配额 OR 外资 OR 供应链 OR 国有化 OR 禁令)'
+    days_back: 30
+    enabled: true
+    notes: "中文宽泛扫描 — 覆盖各省商务厅/工信厅等不在静态源列表中的政策文章"
+
   - id: "cn_state_council"
     country: "CN"
     agency: "中华人民共和国国务院"
@@ -109,6 +118,14 @@ macro_sources:
     url: "https://news.google.com/rss/search?q=中国+供应链尽责+出口管制+关键矿产+产业政策&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
     enabled: true
     notes: "中文 RSS 专线：覆盖国务院 834/835 号、出口管制、供应链尽责等政策"
+
+  - id: "global_proper_nouns_rss"
+    country: "GLOBAL"
+    agency: "专有名词穿透扫描（Danantara/RKAB/RMAP/SCDDP/RCI）"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=%22Critical+Minerals%22+OR+Nickel+OR+Lithium+OR+Copper+OR+Cobalt+%22Export+Ban%22+OR+Tariff+OR+Danantara+OR+RKAB+OR+%22Due+Diligence%22+OR+%22Supply+Chain+Audit%22+OR+%22ESG+Certification%22+OR+%22Responsible+Mining%22+OR+CSRD+OR+CSDDD+OR+%22Battery+Regulation%22+OR+CBAM&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+    notes: "v5.2 概念伞扫描：用 ESG Certification/Responsible Mining/Supply Chain Audit 等大词捕获 IRMA/Nickel Mark/Copper Mark 等未知标准"
 
   - id: "cn_policy_rss_en"
     country: "CN"
@@ -241,3 +258,21 @@ macro_sources:
     dom_selector: "body"
     enabled: true
     notes: "EU Critical Raw Materials Act / CBAM 碳边境调节等政策来源"
+
+  # ---- 西语区（拉美矿产政策）----
+  - id: "latam_policy_rss_es"
+    country: "GLOBAL"
+    agency: "拉美矿产政策-RSS西语专线"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=minerales+cr%C3%ADticos+tierras+raras+litio+cobalto+n%C3%ADquel+cobre+exportaci%C3%B3n+nacionalizaci%C3%B3n&hl=es-419&gl=AR&ceid=AR:es-419"
+    enabled: true
+    notes: "西语 RSS 专线：覆盖智利/阿根廷/秘鲁/玻利维亚/墨西哥等拉美矿产政策"
+
+  # ---- 法语区（非洲矿产政策）----
+  - id: "africa_policy_rss_fr"
+    country: "GLOBAL"
+    agency: "非洲矿产政策-RSS法语专线"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=min%C3%A9raux+critiques+terres+rares+lithium+cobalt+nickel+cuivre+exportation+quota&hl=fr&gl=CD&ceid=CD:fr"
+    enabled: true
+    notes: "法语 RSS 专线：覆盖刚果(金)/几内亚/马达加斯加/摩洛哥等非洲矿产政策"

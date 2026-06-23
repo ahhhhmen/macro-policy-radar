@@ -1,49 +1,165 @@
-version: "2.0"
-last_updated: "2026-06-22"
+version: "3.0"
+last_updated: "2026-06-23"
 description: |
-  全球关键矿产政策事实基线库。经 2026 年 6 月实时情报核对。
-  大模型推演必须以此为锚点，除非最新情报明确宣告基线已被新法案颠覆。
+  全球关键矿产政策事实基线库 + 政策文件实体种子。
+  每个 documents 条目 = 一个 Notion 容器实体。
+  LLM 推演以 baseline 规则为常识锚点。
 
 baselines:
   ID:
     country: "印度尼西亚 (Indonesia)"
-    rules:
-      - "出口禁令常识：2020年起全面禁镍原矿出口，2023年禁铝土矿。任何限制开采的新规，冲击的都是『印尼国内冶炼厂的原料供给（内贸溢价）』，绝对不可能是『原矿出口量』。"
-      - "RKAB机制：RKAB是印尼采矿与销售的唯一合法配额凭证（现效力3年）。受反腐及环境合规驱动，当前审批严苛，未获批矿山必须停产。"
-      - "定向推演路径：上游合法配额受限 → 中游国内镍矿供给紧张、内贸原矿溢价(HPM)上行、独立冶炼厂利润挤压、一体化矿企获相对成本优势 → 下游全球中间品(MHP/镍铁)底部价格支撑强化。"
+    documents:
+      - official_name: "Peraturan Pemerintah Nomor 24 Tahun 2026 tentang Tata Kelola Ekspor Komoditas Sumber Daya Alam Strategis Melalui Badan Usaha Milik Negara"
+        chinese_name: "2026年第24号政府条例：关于通过国有企业治理战略性自然资源商品出口"
+        short_name: "PP 24/2026 (DSI)"
+        type: "Regulation"
+        effective_date: "2026-06-01"
+        baseline: "PP 24/2026 设立 Danantara 旗下子公司 PT Danantara Sumberdaya Indonesia 为煤炭/毛棕榈油/铁合金(NPI/镍铁)唯一出口专营窗口。过渡期 6/1-8/31 强制 CEISA 4.0 申报；9/1 评估；不迟于12/31 全面生效。企业可凭深度本地投资申请豁免。"
+      - official_name: "Undang-Undang Nomor 3 Tahun 2020 tentang Pertambangan Mineral dan Batubara"
+        chinese_name: "2020年第3号矿产和煤炭开采法"
+        short_name: "UU 3/2020 (Mining Law)"
+        type: "Law"
+        effective_date: "2020-06-10"
+        baseline: "2020年起全面禁镍原矿出口，2023年禁铝土矿。任何限制开采的新规，冲击的是印尼国内冶炼厂的原料供给（内贸溢价），而非原矿出口量。"
+      - official_name: "Peraturan Menteri ESDM tentang Rencana Kerja dan Anggaran Biaya (RKAB)"
+        chinese_name: "能矿部 RKAB 采矿工作计划与预算条例"
+        short_name: "RKAB Regulation"
+        type: "Regulation"
+        effective_date: ""
+        baseline: "RKAB 是印尼采矿与销售的唯一合法配额凭证（现效力3年）。受反腐及环境合规驱动，当前审批严苛，未获批矿山必须停产。定向推演：上游配额受限→中游镍矿供给紧张→内贸原矿溢价上行→独立冶炼厂利润挤压→一体化矿企获成本优势→下游全球中间品底部价格支撑强化。"
 
   PH:
     country: "菲律宾 (Philippines)"
-    rules:
-      - "出口现状：全球红土镍矿核心出口国。2025年中期《采矿财政制度法案》已正式剔除原矿出口禁令条款，转向财政税收（利润分成）为主。暂无断供风险。"
-      - "推演逻辑：博弈点转向高额采矿税与环保审查。任何菲国矿权异动或税费上调，将直接推高中国本土 NPI（镍铁）企业的原料采购成本。"
+    documents:
+      - official_name: "Philippine Mining Fiscal Regime Act of 2025"
+        chinese_name: "2025年菲律宾采矿财政制度法案"
+        short_name: "Mining Fiscal Regime Act 2025"
+        type: "Law"
+        effective_date: "2025"
+        baseline: "全球红土镍矿核心出口国。2025年中期该法案已正式剔除原矿出口禁令条款，转向利润分成为主的财政税收模式。暂无断供风险。博弈点转向高额采矿税与环保审查。"
 
   ZW:
     country: "津巴布韦 (Zimbabwe)"
-    rules:
-      - "出口禁令常识：原矿(DSO)出口早已禁止。当前政策焦点是锂精矿管控——政府已对锂精矿出口加征16%出口税，并计划于2027年1月起全面禁止锂精矿出口。"
-      - "推演逻辑：津国政策旨在逼迫矿企建设碳酸锂/硫酸锂冶炼厂。任何加码新规，均直接大幅推高外资在当地的二次 Capex（资本开支），影响中资矿企投资回报模型。"
+    documents:
+      - official_name: "Zimbabwe Lithium Concentrate Export Control Policy (2027 Ban)"
+        chinese_name: "津巴布韦锂精矿出口管制政策（2027年禁令）"
+        short_name: "Zimbabwe Lithium Export Ban 2027"
+        type: "Policy"
+        effective_date: "2027-01-01"
+        baseline: "原矿(DSO)出口早已禁止。当前锂精矿已加征16%出口税，计划2027年1月起全面禁止锂精矿出口。旨在逼迫矿企建设碳酸锂/硫酸锂冶炼厂，大幅推高外资 Capex。"
 
   CN:
     country: "中国 (China)"
-    rules:
-      - "出口管制升级路径：2023年对镓/锗实施出口许可制，2024年对石墨及锑实施管制（9月生效）。自2026年起，白银及部分关键金属正式进入『国营贸易授权框架（白名单制）』，实现从防扩散式限制向精准实体白名单审核的升级。"
-      - "推演逻辑：国内管制收紧将抬升海外下游产业的原料获取难度与通关周期，相对增强国内产业链成本优势。对海外依赖中国原料的冶炼厂构成供应链中断风险。"
+    documents:
+      - official_name: "稀土管理条例 (Rare Earth Management Regulation)"
+        chinese_name: "稀土管理条例"
+        short_name: "稀土管理条例"
+        type: "Regulation"
+        effective_date: "2024-10-01"
+        baseline: "中国稀土出口管制核心法规。对稀土开采、冶炼分离、进出口实施全链条管控，出口配额与许可证管理。"
+      - official_name: "中华人民共和国出口管制法 (Export Control Law of the People's Republic of China)"
+        chinese_name: "中华人民共和国出口管制法"
+        short_name: "出口管制法"
+        type: "Law"
+        effective_date: "2020-12-01"
+        baseline: "2023年对镓/锗实施出口许可制，2024年对石墨及锑实施管制。2026年起白银及部分关键金属进入国营贸易授权白名单制，从防扩散式限制升级为精准实体白名单审核。"
 
   GH:
     country: "加纳 (Ghana)"
-    rules:
-      - "绿色矿产政策：2026年3月议会正式批准首个锂矿协议（Atlantic Lithium 的 Ewoyaa 项目），标志着《绿色矿产政策》走完立法和实操闭环。政策要求禁止未加工锂矿出口，政府强制入股比例底线大幅提高（13-15%以上）。"
-      - "推演逻辑：强制入股与本地加工条款极大压缩外资矿企的初期资本回报率（IRR），强制拉动本地冶炼基建投入。加纳做法正在成为非洲标杆（非盟2025年2月通过全非《绿色矿产战略》）。"
+    documents:
+      - official_name: "Ghana Green Minerals Policy"
+        chinese_name: "加纳绿色矿产政策"
+        short_name: "Green Minerals Policy"
+        type: "Policy"
+        effective_date: "2026-03"
+        baseline: "2026年3月议会正式批准首个锂矿协议（Atlantic Lithium Ewoyaa项目）。政策要求禁止未加工锂矿出口，政府强制入股比例底线大幅提高（13-15%以上）。加纳做法正在成为非洲标杆（非盟2025年2月通过全非《绿色矿产战略》）。"
 
   EU:
     country: "欧盟 (European Union)"
-    rules:
-      - "市场壁垒法则：CRMA（关键原材料法案，65%单一国家依赖上限）及新电池法已全面激活，2027年起电池护照强制追溯碳足迹。"
-      - "推演逻辑：欧盟本土无矿，政策不产生源头『断供』。推演必须聚焦于『市场准入壁垒』——抬升亚洲矿企的碳足迹追溯与 ESG 合规审计成本，可能形成事实上的绿色贸易壁垒。"
+    documents:
+      - official_name: "Regulation (EU) 2024/1252 of the European Parliament and of the Council establishing a framework for ensuring a secure and sustainable supply of critical raw materials (Critical Raw Materials Act)"
+        chinese_name: "欧盟关键原材料法案 (CRMA)"
+        short_name: "EU CRMA 2024"
+        type: "Regulation"
+        effective_date: "2024-05-23"
+        baseline: "CRMA 设定 65%单一国家依赖上限，新电池法 2027年起强制电池护照追溯碳足迹。不产生源头断供，但抬升亚洲矿企碳足迹追溯与 ESG 合规审计成本，形成绿色贸易壁垒。"
+      - official_name: "Regulation (EU) 2023/1542 of the European Parliament and of the Council concerning batteries and waste batteries (EU Battery Regulation)"
+        chinese_name: "欧盟新电池法规 (EU Battery Regulation)"
+        short_name: "EU Battery Regulation 2023"
+        type: "Regulation"
+        effective_date: "2023-08-17"
+        baseline: "2027年起强制电池护照、碳足迹声明、回收成分要求。配合 CRMA 形成关键矿产 ESG 合规双重门。任何关于电池法分阶段实施、配套细则出台或成员国转化进展的新闻，均为合法动态（非历史噪音）。"
+      - official_name: "Directive (EU) 2024/1760 of the European Parliament and of the Council on Corporate Sustainability Due Diligence (CSDDD)"
+        chinese_name: "欧盟企业可持续发展尽职调查指令 (CSDDD)"
+        short_name: "EU CSDDD 2024"
+        type: "Regulation"
+        effective_date: "2024-07-25"
+        baseline: "多阶段长效框架，要求大型企业对供应链中的人权与环境影响进行尽职调查。当前处于逐步扩大适用企业范围及成员国国内法转化关键期。推演：成员国转化 → 中资矿企触发强制性供应链审计 → ESG合规成本上升。"
+      - official_name: "Directive (EU) 2022/2464 of the European Parliament and of the Council on Corporate Sustainability Reporting (CSRD)"
+        chinese_name: "欧盟企业可持续发展报告指令 (CSRD)"
+        short_name: "EU CSRD 2022"
+        type: "Regulation"
+        effective_date: "2023-01-05"
+        baseline: "多阶段长效框架，强制企业披露 ESG 信息。当前处于分阶段扩大适用范围（从大企业→中小企业）及各成员国转化期。推演：报告义务扩展 → 矿企需披露供应链碳排放与人权数据 → 数据穿透风险增加。"
 
   AR:
     country: "阿根廷 (Argentina)"
-    rules:
-      - "国家投资导向：RIGI（大型投资激励制度）2024年通过，已延期至2027年。提供25%固定所得税上限、30年外汇稳定期与关税豁免，极度鼓励外资开采出口。2025-2026年超1000亿美元意向项目排队申请。"
-      - "推演逻辑：国家层面全力促供给。摩擦主要源自省级地方政府的特许权分配争议与环保抗议。推演应聚焦于项目落地的行政延期风险，而非政策转向风险。"
+    documents:
+      - official_name: "Régimen de Incentivo para Grandes Inversiones (RIGI)"
+        chinese_name: "大型投资激励制度 (RIGI)"
+        short_name: "RIGI"
+        type: "Law"
+        effective_date: "2024"
+        baseline: "RIGI 2024年通过，已延期至2027年。提供25%固定所得税上限、30年外汇稳定期与关税豁免。2025-2026年超1000亿美元意向项目排队。摩擦主要来自省级特许权分配争议与环保抗议。"
+
+  US:
+    country: "美国 (United States)"
+    documents:
+      - official_name: "Inflation Reduction Act of 2022 (IRA) Section 45W - Clean Vehicle Credit Critical Mineral and Battery Component Requirements"
+        chinese_name: "2022年通胀削减法案第45W条：清洁车辆税收抵免关键矿物与电池组件要求"
+        short_name: "IRA Section 45W"
+        type: "Law"
+        effective_date: "2022-08-16"
+        baseline: "IRA Section 45W 将电池矿产溯源与免税优惠挂钩，FEOC（外国关注实体）限制2024年起排除中国电池组件与矿物。Section 30D 额外提供消费者清洁车辆税收抵免。"
+
+  CD:
+    country: "刚果（金） (DRC)"
+    documents:
+      - official_name: "Arrêté Ministériel relatif aux quotas d'exportation de cobalt en République Démocratique du Congo"
+        chinese_name: "刚果（金）钴出口配额部令"
+        short_name: "DRC Cobalt Export Quota"
+        type: "Regulation"
+        effective_date: "2025"
+        baseline: "刚果(金)政府收紧钴出口配额，2025年剩余时间内限定约1.8万吨，2026-2027年年出口上限约9.6万吨，较2024年22万吨实际出口量降幅超50%。"
+
+  GLOBAL:
+    country: "全球标准与跨国倡议 (Global Standards)"
+    documents:
+      - official_name: "Initiative for Responsible Mining Assurance (IRMA)"
+        chinese_name: "负责任采矿保障倡议 (IRMA)"
+        short_name: "IRMA"
+        type: "Standard"
+        effective_date: ""
+        baseline: "行业认证标准。虽不具备国家司法强制力，但在全球供应链中作为商业准入壁垒存在。下游车企/电池厂常以此为采购红线。任何标准更新（升级、否决项增加）→ 增加上游矿企ESG审计成本与改造Capex → 加剧劣币淘汰，提升合规矿源溢价。"
+
+      - official_name: "Risk Management and Assurance Program for the Critical Minerals Supply Chain (RMAP SCDDP)"
+        chinese_name: "关键矿产供应链风险管理和保障计划 (RMAP SCDDP)"
+        short_name: "RMAP SCDDP"
+        type: "Standard"
+        effective_date: "2025-05"
+        baseline: "全球关键矿产供应链合规审查标准。推演逻辑：标准升级 → 合规摩擦成本增加 → 非合规矿源被挤出主流供应链 → 合规溢价上升。"
+
+      - official_name: "Nickel Mark (Nickel Institute Responsible Mining Standard)"
+        chinese_name: "镍标记（镍协会负责任采矿标准）"
+        short_name: "Nickel Mark"
+        type: "Standard"
+        effective_date: ""
+        baseline: "镍行业专属 ESG 认证标准。推演逻辑同 IRMA：认证标准更新 → 非认证镍源面临下游采购排斥 → 认证溢价分化。"
+
+      - official_name: "Copper Mark (Copper Industry Responsible Production Standard)"
+        chinese_name: "铜标记（铜行业负责任生产标准）"
+        short_name: "Copper Mark"
+        type: "Standard"
+        effective_date: ""
+        baseline: "铜行业 ESG 认证标准。推演逻辑：认证更新 → 合格铜源供给收缩 → 认证溢价。"
+

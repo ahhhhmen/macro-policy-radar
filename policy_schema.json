@@ -5,227 +5,129 @@
   "properties": {
     "is_valid_macro_policy": {
       "type": "boolean",
-      "description": "【最高优先级杀伤开关】仔细阅读输入文本。如果该文本是：1. 网页导航栏或免责声明；2. 与跨国矿产毫无关联的微观社会新闻（如车展、劫案）；3. 毫无实质性约束条款的论坛口水宣言；4. 纯国内的区域发展政策（未涉及跨境贸易壁垒）。你必须立刻填 false！只有遇到真正的跨国关键矿产、地缘博弈、合规审查等实质性政策，才填 true。"
+      "description": "【最高优先级杀伤开关】若文本是网页导航/免责声明/无关社会新闻/无实质条款的论坛宣言，填 false。⚠️ 特别豁免：针对欧盟 CSRD/CSDDD/电池法案/CBAM 等多年度长效法案，任何关于其『分阶段实施』『配套细则出台』『成员国国内法转化』的新闻，均为合法宏观政策动态，必须填 true，绝不能当做历史废料丢弃。"
     },
     "metadata": {
       "type": "object",
       "properties": {
-        "country": {
-          "type": "string",
-          "description": "政策颁布国家或地区，使用ISO标准二字码，如 CN, ID, ZW, CD, EU"
-        },
+        "country": { "type": "string", "description": "政策颁布国家或地区，ISO二字码，如 CN, ID, CD, EU, US" },
         "mineral_types": {
           "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "Lithium",
-              "Cobalt",
-              "Nickel",
-              "Copper",
-              "Rare Earths",
-              "Graphite",
-              "Others"
-            ]
-          },
+          "items": { "type": "string", "enum": ["Lithium","Cobalt","Nickel","Copper","Rare Earths","Graphite","Others"] },
           "description": "涉及的关键矿产种类"
         },
         "policy_source_type": {
           "type": "string",
-          "enum": [
-            "Official_Gazette",
-            "Ministry_Website",
-            "Customs_Announcement",
-            "Tier1_Commodity_Media"
-          ],
+          "enum": ["Official_Gazette","Ministry_Website","Customs_Announcement","Tier1_Commodity_Media"],
           "description": "信息源头分类"
         },
-        "issuing_authority": {
-          "type": "string",
-          "description": "政策颁布主体/发起机构全称（如：欧盟委员会、世界银行、美国能源部DOE、印尼能矿部ESDM、中国发改委、中国商务部）。必须从原文提炼，不得为空。若原文无明确机构则填发布国/地区政府全称。"
-        }
+        "issuing_authority": { "type": "string", "description": "政策颁布主体/发起机构全称，不得为空" }
       },
-      "required": [
-        "country",
-        "mineral_types",
-        "policy_source_type",
-        "issuing_authority"
-      ]
+      "required": ["country","mineral_types","policy_source_type","issuing_authority"]
     },
-    "policy_dynamics": {
+    "policy_entity": {
       "type": "object",
+      "description": "【v5.0 · 政策实体】用于数据库查重与建档的稳定标识。同一法案的不同报道必须输出完全相同的实体信息。",
       "properties": {
-        "policy_name_zh": {
+        "official_name": {
           "type": "string",
-          "description": "【标题 · 准确优先于冲击力】结构化公式：【[国家二字码] {颁布主体}核心动作：法案/文件核心 (涉及矿种)】。必须显式包含颁布主体（如『印尼能矿部』『欧盟委员会』）。标题概括核心动作即可，禁止使用『重磅/颠覆/史无前例/全面收紧/铁腕』等渲染词。不得在标题中编造原文未出现的数字（如『15%出口税』）。若原文为程序性说明，标题应体现『发布xx说明/指引/流程』而非『收紧/管控/冲击』。正确：『[ID] 印尼能矿部发布采矿许可证申请流程说明 (镍/铜)』；错误：『[ID] 印尼能矿部全面收紧采矿治理 (镍/铜)』。"
+          "description": "【绝对主键】提取原文中最官方的名称全称或缩写。这不仅包括国家法案，还【必须包括全球/行业级的ESG与合规认证标准】（例如 IRMA、Nickel Mark、Copper Mark、RMAP SCDDP、ICMM Principles 等）。若原文有全称，提取全称；若仅有缩写，提取缩写并在括号内注明全称。切勿遗漏行业标准。"
         },
-        "policy_name_original": {
+        "chinese_translation": {
           "type": "string",
-          "description": "政策/法案的原语言全称"
+          "description": "official_name 的精准中文翻译。例：'2023年第10号能矿部令'、'欧盟关键原材料法案'。"
         },
         "current_stage": {
           "type": "string",
-          "enum": [
-            "Proposal",
-            "Under_Debate",
-            "Approved_Not_Effective",
-            "Fully_Effective",
-            "Suspended",
-            "Procedural_Statement",
-            "Unverified",
-            "Historical_Noise"
-          ],
-          "description": "政策所处的最新法律/行政阶段。Historical_Noise=新闻仅为历史旧规复述、回顾性文章、已存在多年的倡议被重新引述，且无任何新进展/新条款/新修订。一旦选此阶段，系统将直接丢弃不入库。"
+          "enum": ["Proposal","Under_Debate","Approved_Not_Effective","Fully_Effective","Suspended","Repealed","Procedural_Statement","Unverified","Historical_Noise"],
+          "description": "该法案当前的法律/行政阶段。Historical_Noise=纯历史回顾无新进展，系统将丢弃。"
         },
-        "effective_date": {
+        "document_type": {
           "type": "string",
-          "format": "date",
-          "description": "正式生效日期，若未知则填空"
+          "enum": ["Law","Regulation","Policy","Standard","Administrative_Order","Other"],
+          "description": "文件法律层级"
         },
-        "policy_dimension": {
+        "master_tag": {
           "type": "string",
-          "enum": [
-            "Trade_Restriction",
-            "Resource_Sovereignty",
-            "Supply_Chain_Governance",
-            "ESG_Compliance",
-            "Industrial_Policy",
-            "Green_Transition"
-          ],
-          "description": "政策的一级维度分类（兜底维度标签）"
-        },
-        "core_category": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "Export_Ban",
-              "Export_Restriction",
-              "Resource_Nationalism",
-              "Beneficiation_Mandate",
-              "Tariff_Adjustment",
-              "Foreign_Equity_Restriction",
-              "Tax_Royalties_Change",
-              "Supply_Chain_Due_Diligence",
-              "State_Procurement_Monopoly",
-              "ESG_Compliance_Mandate",
-              "Strategic_Stockpile",
-              "Price_Control_Subsidy",
-              "Carbon_Border_Mechanism",
-              "Critical_Minerals_Strategy",
-              "Green_Subsidy_IRA"
-            ]
-          },
-          "description": "政策核心手段分类（支持多选）"
-        },
-        "substantive_provisions": {
-          "type": "string",
-          "description": "【事实层 · 第一原则】仅从原文逐字或近逐字提取的客观条款，限300字内。严禁增加原文未出现的事实、数字、机构动作、政策手段。若原文为程序性说明、工作通讯、流程指引而非实质性政策约束，必须如实标注（例如：『原文为许可证申请流程说明，未含出口管控/税收等实质约束条款』）。宁可写『原文未披露』，不可补全。禁止修饰词与渲染措辞。"
-        },
-        "factual_basis": {
-          "type": "string",
-          "description": "【事实依据 · 溯源】原文中支撑上述条款的关键语句，可摘录并带引号，供回溯核实。若原文信息稀薄（如仅标题+一句话摘要），必须如实写明：『原文信息有限，仅标题/摘要可核』。这是事实层的可追溯锚点。"
+          "enum": ["Resource_Nationalism","Trade_Barrier","Compliance_Standard","Supply_Chain_Subsidy","Others"],
+          "description": "政策实体的一级分类。遇到任何供应链审查、负责任采矿认证、ESG审核（如 IRMA/RMAP/Nickel Mark/Copper Mark），必须归类为 Compliance_Standard。Resource_Nationalism=资源民族主义/国有化/DSI；Trade_Barrier=贸易壁垒/关税/配额；Supply_Chain_Subsidy=供应���补贴/产业政策。"
         }
       },
-      "required": [
-        "policy_name_zh",
-        "current_stage",
-        "policy_dimension",
-        "core_category",
-        "substantive_provisions",
-        "factual_basis"
-      ]
+      "required": ["official_name","chinese_translation","current_stage","master_tag"]
+    },
+    "event_update": {
+      "type": "object",
+      "description": "【v5.0 · 事件增量】本次新闻报道带来的新动态。同一法案的每次报道可以不同。",
+      "properties": {
+        "event_summary": {
+          "type": "string",
+          "description": "提炼本次新闻报道的核心事实：发生了什么新动态？（如：正式签署、引发某机构抗议、出台实施细则、颁布修订案等）限 200 字。"
+        },
+        "event_classification": {
+          "type": "string",
+          "enum": ["New_Policy_Issuance","Milestone_Amendment","Routine_Commentary"],
+          "description": "【v5.1 事件三分类 · 决定推送】New_Policy_Issuance=全新法案/政策/标准首次出台（必推）；Milestone_Amendment=既有法案发生重大细则变更/通过关键立法节点/颁布重磅实施细则/成员国完成国内法转化（必推）；Routine_Commentary=常规合规提醒/企业准备动作/行业评论（绝对静默，仅入库）。"
+        },
+        "is_major_milestone": {
+          "type": "boolean",
+          "description": "【向后兼容】自动从 event_classification 派生。New_Policy_Issuance/Milestone_Amendment → true，Routine_Commentary → false。"
+        },
+        "event_impact_deduction": {
+          "type": "string",
+          "description": "仅针对【本次动态】的供应链与合规推演（非泛泛而谈）。若 event_summary 无实质影响，可简要写 '无增量影响'。限 400 字。"
+        }
+      },
+      "required": ["event_summary","event_classification"]
+    },
+    "policy_dynamics": {
+      "type": "object",
+      "description": "【v5.0 兼容层】自动从 policy_entity + event_update 派生。下游代码优先读取 policy_entity/event_update。",
+      "properties": {
+        "policy_name_zh": { "type": "string", "description": "自动设为 chinese_translation 或增强标题" },
+        "policy_name_original": { "type": "string", "description": "自动设为 official_name" },
+        "current_stage": { "type": "string", "description": "自动设为 policy_entity.current_stage" },
+        "effective_date": { "type": "string", "format": "date", "description": "正式生效日期 YYYY-MM-DD" },
+        "policy_dimension": { "type": "string", "enum": ["Trade_Restriction","Resource_Sovereignty","Supply_Chain_Governance","ESG_Compliance","Industrial_Policy","Green_Transition"] },
+        "core_category": { "type": "array", "items": { "type": "string" } },
+        "substantive_provisions": { "type": "string", "description": "事实层客观条款" },
+        "factual_basis": { "type": "string", "description": "原文溯源引用" },
+        "event_signature": { "type": "string", "description": "事件去重签名（向后兼容）" },
+        "document_type": { "type": "string" },
+        "document_signature": { "type": "string" }
+      },
+      "required": ["policy_name_zh","current_stage","policy_dimension","core_category","substantive_provisions","factual_basis","event_signature","document_type"]
     },
     "strategic_implications": {
       "type": "object",
+      "description": "【v5.0 兼容层】冲击评估，优先从 event_update 派生。",
       "properties": {
-        "supply_chain_impact_level": {
-          "type": "string",
-          "enum": [
-            "High_Disruption",
-            "Moderate_Adjustment",
-            "Low_Monitoring"
-          ],
-          "description": "对垂直一体化供应链的潜在冲击烈度评估。必须与事实层一致：若原文未披露实质约束条款（程序性说明/信息不足），不得评为 High_Disruption。"
-        },
-        "analytic_confidence": {
-          "type": "string",
-          "enum": [
-            "High",
-            "Medium",
-            "Low"
-          ],
-          "description": "【置信度 · 对标情报界 ICD 203】High=原文明确披露量化条款、生效机制、具体约束对象，可直接据原文推演；Medium=政策方向明确但量化细节待补，推演有部分原文支撑；Low=仅基于行业背景推演，或原文信息稀薄（只有标题+一句话摘要/仅为程序性说明）。若选 Low，必须在 impact_deduction 中明示『原文信息不足』。置信度直接决定是否触发推送：Low 默认不推。"
-        },
-        "industry_baseline_recall": {
-          "type": "string",
-          "description": "【防幻觉常识锚 · 智库基线定锚（CoT 第一步，必须在推演前完成）】翻查你的训练数据，回答该国在该矿种上的现行政策与产业现状：1）该矿种当前是否存在出口禁令/配额/关税？何时生效？2）该国该矿种的核心产能是在矿山端还是冶炼端？外资参与格局如何？3）当前国际价格/供需基准。例：印尼镍矿→2020年已禁止未加工镍矿出口，所有开采镍矿均供国内冶炼园区（莫罗瓦利/纬达贝），NPI/MHP 为主要出口品。若不知道具体现状，必须显式写『分析师注意：此矿种该国的基线现状未从训练数据中确认，以下推演仅基于原文信息』。若系统注入了 knowledge_baselines.yaml 中的基线但被最新情报打破，必须在开头声明『⚠️ 历史基线已被打破』。"
-        },
-        "baseline_shift_detected": {
-          "type": "boolean",
-          "description": "【基线失效雷达 · 范式转移检测】对比你所知的历史基线（含系统注入的 knowledge_baselines.yaml）与这篇最新情报。这篇情报是否构成了对旧基线的『彻底颠覆』？例如：原本禁止出口现在开放了、原本自愿的合规变成了强制入刑、原本禁矿的国家宣布解除禁令。若是正常的政策延续、细化或程序性说明，填 false。一旦设为 true，Python 端会触发运维告警。"
-        },
-        "impact_deduction": {
-          "type": "string",
-          "description": "【分析层 · 节点定向推演 · 严禁编造数值】采用智库级供应链节点穿透法，按 🔻上游→🔺中游→🔻下游 逐节点分析：①上游采矿/原料端：供给、合规、成本的变化方向（定性：收紧/宽松/不变）；②中游冶炼/加工端：供需平衡、冶炼费/加工费方向、利润挤压对象；③下游终端/出口端：产能转移方向、替代采购可行性。硬约束：①每个节点的推演必须以原文事实或 industry_baseline_recall 中的常识为依据；②仅描述方向（收紧/溢价/转移），禁止编造具体百分比、金额、产能数字；③若某节点缺乏信息支撑，必须写『该节点原文与基线均缺乏信息，无法推演』而非编造。"
-        }
+        "supply_chain_impact_level": { "type": "string", "enum": ["High_Disruption","Moderate_Adjustment","Low_Monitoring"] },
+        "analytic_confidence": { "type": "string", "enum": ["High","Medium","Low"] },
+        "industry_baseline_recall": { "type": "string", "description": "智库基线定锚" },
+        "baseline_shift_detected": { "type": "boolean" },
+        "impact_deduction": { "type": "string", "description": "自动设为 event_impact_deduction" }
       },
-      "required": [
-        "supply_chain_impact_level",
-        "analytic_confidence",
-        "industry_baseline_recall",
-        "baseline_shift_detected",
-        "impact_deduction"
-      ]
+      "required": ["supply_chain_impact_level","analytic_confidence","industry_baseline_recall","baseline_shift_detected","impact_deduction"]
     },
     "news_recency_verification": {
       "type": "object",
-      "description": "【v3.5 时效性校验 — 第二道防线】后端 pubDate 无法覆盖的源（anyfeeder/HTML），由 LLM 兜底判断该文章报道的是否为近期新政策，而非历史旧规回顾。",
       "properties": {
-        "is_recent_policy_action": {
-          "type": "boolean",
-          "description": "原文中报道的政策/法案/行政令是近期（本年度内）新颁布、新修订或新提出的实质性动作吗？若原文纯粹回顾历史旧规、介绍已存在多年的倡议、或追述往年政策而没有任何新进展，填 false。"
-        },
-        "declared_publish_year": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "description": "若能推断出该政策的颁布/修订年份，填四位年份数字（如 2026）；若完全无法判断则填 null。供后端二次交叉校验。"
-        }
+        "is_recent_policy_action": { "type": "boolean" },
+        "declared_publish_year": { "type": ["integer","null"] },
+        "article_type": { "type": "string", "enum": ["Official_Announcement","News_Report","Analysis_Commentary","Expert_Opinion"] },
+        "references_existing_document": { "type": "boolean" }
       },
-      "required": [
-        "is_recent_policy_action"
-      ]
+      "required": ["is_recent_policy_action","article_type"]
     },
     "notion_integration": {
       "type": "object",
       "properties": {
-        "master_tag": {
-          "type": "string",
-          "const": "宏观地缘与产业政策"
-        },
-        "dingtalk_alert_required": {
-          "type": "boolean",
-          "description": "若冲击烈度为 High_Disruption 或 Moderate_Adjustment，强制为 true；Low_Monitoring 强制为 false"
-        },
-        "source_article_url": {
-          "type": "string",
-          "description": "从原始情报文本中提取的政策全文/官方公告链接，供回溯溯源"
-        }
+        "master_tag": { "type": "string", "const": "宏观地缘与产业政策" },
+        "dingtalk_alert_required": { "type": "boolean" },
+        "source_article_url": { "type": "string" }
       },
-      "required": [
-        "master_tag",
-        "dingtalk_alert_required"
-      ]
+      "required": ["master_tag","dingtalk_alert_required"]
     }
   },
-  "required": [
-    "is_valid_macro_policy",
-    "metadata",
-    "policy_dynamics",
-    "strategic_implications",
-    "news_recency_verification",
-    "notion_integration"
-  ]
+  "required": ["is_valid_macro_policy","metadata","policy_entity","event_update","policy_dynamics","strategic_implications","news_recency_verification","notion_integration"]
 }

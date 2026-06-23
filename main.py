@@ -13,7 +13,7 @@ import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-from openai import OpenAI
+from llm_cache import get_cached_client
 
 # v3.1: 容忍部分政府网站 SSL 证书问题
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -48,9 +48,8 @@ def load_schema(schema_path):
 
 def load_knowledge_baselines(yaml_path):
     """
-    加载基线知识库。
+    加载基线知识库。兼容 v2.0 (rules 字符串列表) 和 v3.0 (documents 结构化列表)。
     返回 (dict{country_code: [rule_strings]}, last_updated: str)
-    示例：{'ID': ['镍原矿自2020年起禁出口', ...], ...}, '2026-06-22'
     """
     if not os.path.isfile(yaml_path):
         print(f"ℹ️ 基线知识库文件不存在 ({yaml_path})，跳过注入。")
@@ -60,7 +59,13 @@ def load_knowledge_baselines(yaml_path):
             config = yaml.safe_load(f) or {}
         result = {}
         for code, entry in config.get("baselines", {}).items():
-            if entry and entry.get("rules"):
+            if not entry:
+                continue
+            # v3.0: 从 documents 提取 baseline 文本
+            if entry.get("documents"):
+                result[code] = [d["baseline"] for d in entry["documents"] if d.get("baseline")]
+            # v2.0 向后兼容
+            elif entry.get("rules"):
                 result[code] = entry["rules"]
         return result, config.get("last_updated", "unknown")
     except Exception as e:
@@ -505,26 +510,29 @@ def generate_queries_from_matrix(matrix_config, max_keywords_per_query=8):
 
     return queries
 
-_deepseek_client = None
+# v5.0: 统一缓存客户端（替代原始 OpenAI Client）
+# 内置进程内存去重 + 磁盘缓存，提升 DeepSeek API 缓存命中率
+_llm_client = None
 
-def _get_deepseek_client():
-    """模块级单例：复用 OpenAI Client，避免每次调用重复初始化"""
-    global _deepseek_client
-    if _deepseek_client is None:
-        _deepseek_client = OpenAI(
-            api_key=os.environ.get("OPENAI_API_KEY"),
-            base_url=os.environ.get("OPENAI_BASE_URL", "https://api.deepseek.com"),
-            max_retries=2,
-        )
-    return _deepseek_client
+def _get_llm_client():
+    """获取全局 CachedLLMClient 单例"""
+    global _llm_client
+    if _llm_client is None:
+        _llm_client = get_cached_client()
+    return _llm_client
 
 def discover_hotspots(max_count=5):
-    """方案 B：让 DeepSeek 推荐本周矿产政策热点查询（v3.1: 提示词增强）"""
-    client = _get_deepseek_client()
+    """方案 B：让 DeepSeek 推荐本周矿产政策热点查询（v5.0: 缓存命中优化）"""
+    client = _get_llm_client()
     prompt = (
         "你是一个全球关键矿产政策追踪专家。请基于你对近期地缘政治和产业动态的了解，"
-        f"推荐 {max_count} 条本周最值得关注的矿产政策英文搜索查询。"
+        f"推荐 {max_count} 条本周最值得关注的矿产政策搜索查询。"
+        "其中英文4条（覆盖全球政策源）、中文3条（覆盖中国国务院/商务部/省级政府/新华社等）、"
+        "西班牙语2条（覆盖智利/阿根廷/秘鲁/玻利维亚等拉美矿产政策）、"
+        "法语1条（覆盖刚果(金)/几内亚/马达加斯加等非洲矿产政策）。"
         "每条查询应组合具体矿种、国家/地区和政策术语。"
+        "西语查询示例：'litio nacionalización Chile 2026'、'cobre Perú exportación restricciones'。"
+        "法语查询示例：'cobalt exportation quota RDC 2026'、'lithium mine Mali fiscalité'。"
         "请特别关注以下近期热点方向：\n"
         "- 国家统购统销/国内供应义务（Domestic Supply Obligation, DSI）\n"
         "- 供应链尽责立法/ESG合规（Supply Chain Due Diligence）\n"
@@ -534,7 +542,8 @@ def discover_hotspots(max_count=5):
         f'请以 JSON 格式返回，格式如下：{{"queries": ["query1", "query2", ...]}}'
     )
     try:
-        response = client.chat.completions.create(
+        response = client.chat_completion(
+            task_type="hotspot_discovery",
             model="deepseek-v4-pro",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
@@ -588,6 +597,33 @@ _SYSTEM_PROMPT_V40 = (
     "  → effective_date 必须留空\n"
     "  → supply_chain_impact_level 不得评为 High_Disruption\n"
     "  → 标题应体现『发布xx说明/指引/流程』而非『收紧/管控/冲击』\n\n"
+    "【目标矿种范围（is_valid_macro_policy 杀伤开关）】\n"
+    "本系统仅追踪以下 6 种关键矿产的政策动态：锂、钴、镍、铜、稀土、石墨。\n"
+    "以下品类不属于目标范围，必须判定 is_valid_macro_policy=false：\n"
+    "  - 石油/原油、天然气/LNG、煤炭、铁矿石、铝土矿、金、银、钻石\n"
+    "  - 能源安全政策（如天然气保留计划、石油储备、煤炭出口禁令等）\n"
+    "  - 农业大宗商品、粮食安全政策\n"
+    "若原文仅涉及上述排除品类而未触及 6 种目标矿产，直接判无效。\n\n"
+    "【v5.0 实体-事件分离 · 核心架构】\n"
+    "- policy_entity：描述『政策文件本身』（稳定的、跨报道不变的标识信息）\n"
+    "  · official_name：从原文提取最完整、最官方的法案名称原文（去重主键）。宁可保留原文长全称，不要自己缩写。\n"
+    "  · chinese_translation：该名称的精准中文翻译\n"
+    "  · current_stage：该法案当前的法律阶段\n"
+    "  · document_type：该文件的法律层级\n"
+    "- event_update：描述『本次报道带来的增量动态』（每次报道可以不同）\n"
+    "  · event_summary：本次报道的核心事实（发生了什么新动态？）\n"
+    "  · event_classification（决定推送的三分类）：\n"
+    "    - New_Policy_Issuance：全新法案/政策/标准首次出台 → 必推钉钉\n"
+    "    - Milestone_Amendment：既有文件发生阶段实质推进/重大细则变更/官方反转/全行业震荡 → 必推钉钉\n"
+    "    - Routine_Commentary：既有文件的常规落地/企业合规/行业评论/重复报道 → 绝对静默仅入库\n"
+    "  · event_impact_deduction：仅针对本次动态的供应链推演\n"
+    "- 同一法案的不同新闻报道 → policy_entity 必须完全一致，event_update 可以不同\n"
+    "- policy_dynamics 和 strategic_implications 字段仍需填写（向后兼容），内容从 policy_entity/event_update 自动派生\n\n"
+    "【文件 vs 报道 · 核心区分（v4.5）】\n"
+    "- 本系统以『政策文件』为知识单元，而非以『新闻报道』为单元。\n"
+    "- 若原文是某一具体法律法规/政策文件/标准的初次颁布、修订文本或官方公告全文 → document_type 填对应类型，article_type 填 Official_Announcement\n"
+    "- 若原文是对既有文件的新闻报道、分析评论、专家解读 → document_type 填 Other，article_type 填 News_Report/Analysis_Commentary/Expert_Opinion\n"
+    "- 若原文报道了某个可识别的政策文件，references_existing_document=true，document_signature 填被引用文件的签名\n\n"
     "【重点监控的政策类型（识别但不夸大）】\n"
     "1. 传统贸易壁垒：出口禁令/限制、关税调整、配额、外资股权限制、税率矿权变动\n"
     "2. 资源主权措施：国有化、征收、国内供应义务(DSI)/统购统销、国家强制采购、战略储备\n"
@@ -597,6 +633,12 @@ _SYSTEM_PROMPT_V40 = (
     "【标题原则：准确 > 冲击力】\n"
     "- 标题概括核心动作即可，禁止使用『重磅/颠覆/史无前例/全面收紧/铁腕/雷霆』等渲染词。\n"
     "- 不得在标题中编造原文未出现的数字。\n\n"
+    "【事件去重签名（event_signature · 防止同事件多报道重复入库）】\n"
+    "- 格式：{国家二字码}-{主矿种或'多矿种'}-{规范动作标签}-{年份季度}\n"
+    "- 规范动作标签只能从以下选择：出口管制、出口禁令、关税调整、配额调整、外资限制、国有化、供应链尽责、ESG监管、产业补贴、税收调整、矿权许可、战略储备、价格干预\n"
+    "- 关键约束：不同新闻源报道同一政策事件时，必须生成完全相同的 event_signature。\n"
+    "  例：'中国暂停对镝/铽等中重稀土的出口许可证管理'和'商务部暂缓稀土出口限制'是同一事件 → 都输出 'CN-稀土-出口管制-2026Q2'\n"
+    "- 矿种字段：若涉及矿种多于1个且无明确主次，填'多矿种'；否则填单一主要矿种。\n\n"
     "【输出纪律】宁可漏判一条边缘政策，不可错推一条编造的『重磅预警』。信息不足时，如实标注，让下游人工复核。"
 )
 
@@ -604,33 +646,85 @@ _SYSTEM_PROMPT_V40 = (
 _SYSTEM_PROMPT_V31 = _SYSTEM_PROMPT_V40
 
 
-def extract_macro_policy(raw_text, schema_dict):
-    """调用 DeepSeek 进行高管看板级宏观研判（v4.0: 事实优先 + 事实-分析分层 + 置信度）"""
-    client = _get_deepseek_client()
+def extract_macro_policy(raw_text, schema_dict, baseline_injection=""):
+    """调用 DeepSeek 进行高管看板级宏观研判（v5.1: Context Cache 前缀复用 + 基线独立 system 消息）"""
+    client = _get_llm_client()
     system_prompt = (
         f"{_SYSTEM_PROMPT_V40}\n\n"
         f"【⚠️ 核心硬约束：严格按以下 Schema 规范返回 JSON】\n"
         f"{json.dumps(schema_dict, ensure_ascii=False, indent=2)}"
     )
+    # v5.1: 三段消息结构 → 最大化 DeepSeek Context Cache 前缀复用
+    #   [0] system: 全局静态指令 (~2800 tokens) → 所有调用共享前缀
+    #   [1] system: 按国基线注入 (~100 tokens) → 同国连续调用共享前缀
+    #   [2] user:   动态情报文本 → 每次不同
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": baseline_injection},
+        {"role": "user", "content": f"请对以下原生文本进行过滤与地缘战略推演：\n\n{raw_text}"},
+    ]
     try:
-        response = client.chat.completions.create(
+        response = client.chat_completion(
+            task_type="policy_extraction",
             model="deepseek-v4-pro",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"请对以下原生文本进行过滤与地缘战略推演：\n\n{raw_text}"}
-            ],
+            messages=messages,
             response_format={"type": "json_object"},
-            temperature=0.2,
-            timeout=60,  # v3.3 熔断：单次 AI 调用超时 60s
+            temperature=0.0,  # v5.0: 确定性输出 → 提升 DeepSeek 服务端 + 本地缓存命中率
+            timeout=60,
         )
         content = response.choices[0].message.content
         if content is None:
             print("❌ DeepSeek 返回了空内容")
             return None
-        return json.loads(content)
+        result = json.loads(content)
+        return _normalize_v50(result)
     except Exception as e:
         print(f"❌ DeepSeek 提炼异常: {str(e)}")
         return None
+
+
+def _normalize_v50(data):
+    """v5.0 兼容层：将 policy_entity/event_update 自动映射到 policy_dynamics/strategic_implications"""
+    entity = data.get("policy_entity") or {}
+    event = data.get("event_update") or {}
+    pd = data.setdefault("policy_dynamics", {})
+    si = data.setdefault("strategic_implications", {})
+
+    # 从 entity 派生 policy_dynamics
+    if entity.get("official_name") and not pd.get("policy_name_original"):
+        pd["policy_name_original"] = entity["official_name"]
+    if entity.get("chinese_translation") and not pd.get("policy_name_zh"):
+        pd["policy_name_zh"] = entity["chinese_translation"]
+    if entity.get("current_stage") and not pd.get("current_stage"):
+        pd["current_stage"] = entity["current_stage"]
+    if entity.get("document_type") and not pd.get("document_type"):
+        pd["document_type"] = entity["document_type"]
+
+    # v5.1: master_tag 从 policy_entity 映射到 notion_integration
+    ni = data.setdefault("notion_integration", {})
+    if entity.get("master_tag") and not ni.get("master_tag"):
+        # 将 entity 分类映射为中文标签（兼容 Notion 现有 select 选项）
+        tag_map = {
+            "Resource_Nationalism": "资源民族主义",
+            "Trade_Barrier": "贸易壁垒",
+            "Compliance_Standard": "合规标准",
+            "Supply_Chain_Subsidy": "产业补贴",
+            "Others": "宏观地缘与产业政策",
+        }
+        ni["master_tag"] = tag_map.get(entity["master_tag"], "宏观地缘与产业政策")
+    if not ni.get("master_tag"):
+        ni["master_tag"] = "宏观地缘与产业政策"
+
+    # 从 event_classification 派生 is_major_milestone（向后兼容）
+    ec = event.get("event_classification", "")
+    if ec and not event.get("is_major_milestone"):
+        event["is_major_milestone"] = ec in ("New_Policy_Issuance", "Milestone_Amendment")
+
+    # 从 event 派生 strategic_implications
+    if event.get("event_impact_deduction") and not si.get("impact_deduction"):
+        si["impact_deduction"] = event["event_impact_deduction"]
+
+    return data
 
 
 # =============================================================================
@@ -685,52 +779,63 @@ def _has_regulation_reference(text):
     return False
 
 
-def _should_push(data, fetched_text="", source_depth="shallow"):
+def _should_push(data, fetched_text="", source_depth="shallow", is_new_document=True):
     """
-    【v4.0 双闸门 · 四重拦截】判定一条情报是否够格推送钉钉。
+    【v4.5 文档生命周期驱动推送】以政策文件为推送单元，而非新闻报道。
     返回 (should_push: bool, reason: str)
 
-    闸门 1：烈度 ∈ {High_Disruption, Moderate_Adjustment}
-    闸门 2：来源类型官方一手 OR 文本含法规编号
-    闸门 3：非程序性说明（Procedural_Statement 不推）
-    闸门 4：置信度非 Low（信息不足时宁可漏推）
-
-    本案 ESDM 程序说明：Procedural_Statement + 非法规编号 + Low → 三重拦截。
+    推送触发条件（满足任一即可）：
+      - 新文件出台：article_type=Official_Announcement 且为新文件
+      - 既有文件重大更新：confidence>=Medium 且 impact>=Moderate
+      - 高冲击力分析：article_type=Analysis/Expert 且 confidence=High
+    不再推送：
+      - 已知文件的第 N 篇类似报道
+      - 程序性说明 / 未核实 / 低置信度
     """
     si = data.get("strategic_implications", {}) or {}
     pd = data.get("policy_dynamics", {}) or {}
-    md = data.get("metadata", {}) or {}
+    nrv = data.get("news_recency_verification", {}) or {}
 
+    article_type = nrv.get("article_type", "News_Report")
     impact = si.get("supply_chain_impact_level", "")
-    source_type = md.get("policy_source_type", "")
     stage = pd.get("current_stage", "")
     confidence = si.get("analytic_confidence", "Low")
 
-    # 闸门 1：烈度
-    if impact not in ("High_Disruption", "Moderate_Adjustment"):
-        return False, f"烈度 {impact} 未达推送阈值"
-
-    # 闸门 2：来源类型官方一手 OR 文本含法规编号
-    is_official_source = source_type in PUSH_REQUIRED_SOURCE_TYPES
-    has_regulation = _has_regulation_reference(fetched_text) or _has_regulation_reference(
-        pd.get("substantive_provisions", "") + pd.get("factual_basis", "")
-    )
-    if not is_official_source and not has_regulation:
-        return False, f"非官方一手源（source_type={source_type}，无法规编号）"
-
-    # 闸门 3：程序性说明降级（不推）
+    # 硬性不推（始终保留的底线）
     if stage == "Procedural_Statement":
-        return False, "程序性说明，仅入库待复核"
-
-    # 闸门 4：低置信度不推（信息不足时宁可漏推）
-    if confidence == "Low":
-        return False, f"置信度 Low（信息源深度={source_depth}），仅入库待复核"
-
-    # 闸门 5（未核实阶段也不推）
+        return False, "程序性说明，仅入库"
     if stage == "Unverified":
-        return False, "阶段未核实，仅入库待复核"
+        return False, "阶段未核实，仅入库"
+    if confidence == "Low":
+        return False, f"置信度 Low，仅入库待复核"
 
-    return True, "通过双闸门"
+    # 新文件出台 → 推送（最高优先级）
+    if article_type == "Official_Announcement" and is_new_document:
+        return True, f"新文件出台：{pd.get('policy_name_zh', '')[:40]}"
+
+    # 既有文件，高冲击或高置信分析 → 推送
+    if impact in ("High_Disruption", "Moderate_Adjustment"):
+        return True, f"重大更新（烈度={impact}, 置信度={confidence}）"
+
+    # v5.1 第一层：event_classification 三分类（零额外 API 调用）
+    event = data.get("event_update", {}) or {}
+    ec = event.get("event_classification", "")
+    if ec in ("New_Policy_Issuance", "Milestone_Amendment"):
+        label = "新政策出台" if ec == "New_Policy_Issuance" else "既有文件里程碑变更"
+        return True, f"{label}：{event.get('event_summary', '')[:60]}"
+    if ec == "Routine_Commentary":
+        return False, f"常规动态（{event.get('event_summary', '')[:40]}），绝对静默"
+
+    # 语义 Diff 检测到质变 → 推送（兜底纠错）
+    material_change = data.get("_material_change", {}) or {}
+    if material_change.get("has_material_change"):
+        return True, f"语义Diff检测到质变：{material_change.get('change_summary', '')[:60]}"
+
+    # 高置信度分析/专家意见 → 推送
+    if article_type in ("Analysis_Commentary", "Expert_Opinion") and confidence == "High":
+        return True, "高置信度分析/专家意见"
+
+    return False, f"已知文件的常规报道（类型={article_type}, 烈度={impact}），仅入库"
 
 
 def _sanitize_fabricated_numbers(data, fetched_text):
@@ -798,9 +903,10 @@ def _sanitize_fabricated_numbers(data, fetched_text):
 #  在入库前查询同政策名是否已存在，避免重复创建
 # =============================================================================
 
-def _notion_search_pages(policy_name_zh, policy_name_original=""):
+def _notion_search_pages(official_name, fallback_name=""):
     """
-    在 Notion 数据库中搜索是否已存在同名政策。
+    v5.0: official_name 精确匹配（Title 列）作为去重主键。
+    若 official_name 为空则 fallback 到文档签名或中文名模糊匹配。
     返回 (exists: bool, existing_page_id: str | None)
     """
     notion_token = os.environ.get("NOTION_TOKEN")
@@ -815,24 +921,26 @@ def _notion_search_pages(policy_name_zh, policy_name_original=""):
         "Notion-Version": "2022-06-28"
     }
 
-    # 按政策名称过滤（Notion 的 title 属性过滤）
-    payload = {
-        "filter": {
-            "or": []
-        },
-        "page_size": 5,
-    }
+    payload = {"filter": {"or": []}, "page_size": 5}
 
-    if policy_name_zh:
+    # v5.0: 主路径 — 官方原名精确匹配 Title
+    if official_name:
         payload["filter"]["or"].append({
             "property": "政策名称",
-            "title": {"contains": policy_name_zh}
+            "title": {"equals": official_name}
         })
+        # 兜底：原名太长可能被截断，加 contains
+        if len(official_name) > 50:
+            payload["filter"]["or"].append({
+                "property": "政策名称",
+                "title": {"contains": official_name[:100]}
+            })
 
-    if policy_name_original:
+    # 兜底 — 中文名/文件签名模糊匹配
+    if fallback_name:
         payload["filter"]["or"].append({
-            "property": "原名及出处",
-            "rich_text": {"contains": policy_name_original[:100]}
+            "property": "政策名称",
+            "title": {"contains": fallback_name[:80]}
         })
 
     if not payload["filter"]["or"]:
@@ -869,19 +977,63 @@ def _notion_update_policy(page_id, data, source_url):
     pd = data["policy_dynamics"]
     si = data["strategic_implications"]
     md = data["metadata"]
+    event_signature = pd.get("event_signature", "")
+
+    country_code = md.get("country", "")
+    mineral_types = md.get("mineral_types", [])
+    core_categories = pd.get("core_category", [])
+    impact_level = si.get("supply_chain_impact_level", "Low_Monitoring")
 
     # 仅更新可能变化的字段
     properties = {
         "当前阶段": {"select": {"name": pd["current_stage"]}},
-        "冲击烈度": {"select": {"name": si["supply_chain_impact_level"]}},
+        "冲击烈度": {"select": {"name": impact_level}},
         "核心条款摘要": {"rich_text": [{"text": {"content": str(pd["substantive_provisions"])[:2000]}}]},
         "DeepSeek 结构化分析": {"rich_text": [{"text": {"content": si["impact_deduction"][:4000]}}]},
     }
+    # 事件签名（去重主键，首次入库可能为空，增量时补填）
+    if event_signature:
+        properties["事件签名"] = {"rich_text": [{"text": {"content": event_signature}}]}
 
-    # 动态注入生效日期
+    # v4.5: 增量更新补充字段（首次入库时可能为空，增量时补填）
+    region_name = _COUNTRY_TO_REGION.get(country_code)
+    if region_name:
+        properties["覆盖地区"] = {"multi_select": [{"name": region_name}]}
+    if mineral_types:
+        primary = _MINERAL_TO_PRIMARY.get(mineral_types[0])
+        if primary:
+            properties["主矿种（可选）"] = {"select": {"name": primary}}
+    status_name = _IMPACT_TO_STATUS.get(impact_level)
+    if status_name:
+        properties["处理状态"] = {"status": {"name": status_name}}
+    for cat in core_categories:
+        ptype = _CATEGORY_TO_POLICY_TYPE.get(cat)
+        if ptype:
+            properties["政策类型（可选）"] = {"select": {"name": ptype}}
+            break
+    provisions_text = str(pd.get("substantive_provisions", ""))
+    if provisions_text:
+        properties["要点摘要"] = {"rich_text": [{"text": {"content": provisions_text[:300]}}]}
+    issuing_authority = md.get("issuing_authority", "")
+    if issuing_authority:
+        properties["发布机构"] = {"rich_text": [{"text": {"content": issuing_authority}}]}
+
+    # v4.4: 生效日期 fallback
     effective_date = (pd.get("effective_date") or "").strip()
+    if not effective_date or effective_date.lower() == "null":
+        declared_year = data.get("news_recency_verification", {}).get("declared_publish_year")
+        if declared_year and isinstance(declared_year, int) and 2020 <= declared_year <= 2030:
+            effective_date = f"{declared_year}-06-01"
     if effective_date and effective_date.lower() != "null":
         properties["生效日期"] = {"date": {"start": effective_date}}
+    # v4.5: 发布日期（同样逻辑）
+    publish_date = (pd.get("effective_date") or "").strip()
+    if not publish_date or publish_date.lower() == "null":
+        declared_year = data.get("news_recency_verification", {}).get("declared_publish_year")
+        if declared_year and isinstance(declared_year, int) and 2020 <= declared_year <= 2030:
+            publish_date = f"{declared_year}-06-01"
+    if publish_date and publish_date.lower() != "null":
+        properties["发布日期"] = {"date": {"start": publish_date}}
 
     # v3.1: 更新政策维度标签
     if pd.get("policy_dimension"):
@@ -907,12 +1059,295 @@ def _notion_update_policy(page_id, data, source_url):
         if res.status_code == 200:
             print("🔄 [Notion] 检测到重复政策，已执行增量更新（阶段/条款/烈度）。")
             return True
-        else:
-            print(f"   ⚠️ [Notion] 增量更新失败，状态码: {res.status_code}")
-            return False
+
+        err_text = res.text[:500]
+        # v4.3: 自动剔除 Notion 数据库不存在的属性后重试
+        if res.status_code == 400 and "is not a property that exists" in err_text:
+            import re
+            missing_props = set(re.findall(r'([^\s."]+) is not a property that exists', err_text))
+            if missing_props:
+                stripped = {k: v for k, v in properties.items() if k not in missing_props}
+                payload["properties"] = stripped
+                res2 = requests.patch(url, headers=headers, json=payload, timeout=10)
+                if res2.status_code == 200:
+                    print("🔄 [Notion] 检测到重复政策，已执行增量更新（自动跳过数据库缺失字段）。")
+                    return True
+                print(f"   ⚠️ [Notion] 重试后仍失败，状态码: {res2.status_code}")
+                return False
+
+        print(f"   ⚠️ [Notion] 增量更新失败，状态码: {res.status_code}")
+        return False
     except Exception as e:
         print(f"   ❌ [Notion] 更新连接异常: {str(e)}")
         return False
+
+
+def _notion_append_news(page_id, data, source_url, article_type):
+    """
+    v4.5: 新闻报道/分析评论 → 追加到已有政策文件下，不创建新记录。
+    更新：关联报道数 +1、最后报道日期、在页面 body 追加折叠引用块。
+    """
+    notion_token = os.environ.get("NOTION_TOKEN")
+    if not notion_token or notion_token == "disabled":
+        return False
+
+    pd = data.get("policy_dynamics", {})
+    si = data.get("strategic_implications", {})
+    article_label = {
+        "News_Report": "新闻报道", "Analysis_Commentary": "分析评论",
+        "Expert_Opinion": "专家解读",
+    }.get(article_type, "相关报道")
+
+    policy_name = pd.get("policy_name_zh", "未命名")
+    summary_text = str(pd.get("substantive_provisions", "") or si.get("impact_deduction", ""))[:300]
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # 更新属性：关联报道数递增、最后报道日期
+    headers = {
+        "Authorization": f"Bearer {notion_token}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+    }
+
+    # 先读取当前计数
+    try:
+        r = requests.get(f"https://api.notion.com/v1/pages/{page_id}", headers=headers, timeout=10)
+        current_count = 0
+        if r.status_code == 200:
+            num_prop = r.json().get("properties", {}).get("关联报道数", {})
+            current_count = num_prop.get("number", 0) or 0
+    except Exception:
+        pass
+
+    props_update = {
+        "关联报道数": {"number": current_count + 1},
+        "最后报道日期": {"date": {"start": today}},
+    }
+
+    # v5.1: 时间轴直排——追加到页面正文末尾
+    impact_text = str(si.get("impact_deduction", ""))[:400]
+    children = [
+        {
+            "object": "block", "type": "heading_3",
+            "heading_3": {"rich_text": [{"text": {"content": f"📅 {today} · {article_label}"}}]}
+        },
+        {
+            "object": "block", "type": "paragraph",
+            "paragraph": {"rich_text": [{"text": {"content": f"【事实摘要】{summary_text}"}}]}
+        },
+    ]
+    if impact_text:
+        children.append({
+            "object": "block", "type": "paragraph",
+            "paragraph": {"rich_text": [{"text": {"content": f"【战略推演】{impact_text}"}}]}
+        })
+    if source_url:
+        children.append({
+            "object": "block", "type": "paragraph",
+            "paragraph": {"rich_text": [{"text": {"content": "🔗 溯源原文", "link": {"url": source_url}}}]}
+        })
+    children.append({"object": "block", "type": "divider", "divider": {}})
+
+    payload = {
+        "properties": props_update,
+        "children": children,
+    }
+
+    try:
+        url = f"https://api.notion.com/v1/pages/{page_id}"
+        res = requests.patch(url, headers=headers, json=payload, timeout=10)
+        if res.status_code == 200:
+            print(f"📎 [Notion] 已追加{article_label}到已有文件（关联报道数: {current_count + 1}）")
+            return True
+        else:
+            print(f"   ⚠️ [Notion] 追加报道失败，状态码: {res.status_code}")
+            return False
+    except Exception as e:
+        print(f"   ❌ [Notion] 追加报道连接异常: {str(e)}")
+        return False
+
+
+def _semantic_diff(page_id, new_data):
+    """
+    v4.5: 语义 Diff —— 比较已有文件摘要与新报道，判断是否有质变。
+    读取 Notion 页面的 核心条款摘要 + DeepSeek 结构化分析，与最新文本比对，
+    调用 LLM 判定：纯粹复述已知信息（MUTE）还是包含实质新进展（ALERT）。
+    返回 {"has_material_change": bool, "change_summary": str}
+    """
+    notion_token = os.environ.get("NOTION_TOKEN")
+    if not notion_token or notion_token == "disabled":
+        return {"has_material_change": False, "change_summary": ""}
+
+    headers = {
+        "Authorization": f"Bearer {notion_token}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+    }
+
+    # 读取已有页面的核心摘要
+    old_summary = ""
+    try:
+        r = requests.get(
+            f"https://api.notion.com/v1/pages/{page_id}",
+            headers=headers, timeout=10
+        )
+        if r.status_code == 200:
+            props = r.json().get("properties", {})
+            provisions = props.get("核心条款摘要", {}).get("rich_text", [])
+            analysis = props.get("DeepSeek 结构化分析", {}).get("rich_text", [])
+            old_summary = (
+                ''.join(t.get("plain_text", "") for t in provisions)
+                + '\n'
+                + ''.join(t.get("plain_text", "") for t in analysis)
+            )[:3000]
+    except Exception:
+        pass
+
+    if not old_summary.strip():
+        return {"has_material_change": True, "change_summary": "无法读取已有摘要，保守推送"}
+
+    # 构建 Diff prompt
+    pd = new_data.get("policy_dynamics", {}) or {}
+    si = new_data.get("strategic_implications", {}) or {}
+    new_text = (
+        f"标题：{pd.get('policy_name_zh', '')}\n"
+        f"条款：{str(pd.get('substantive_provisions', ''))[:1500]}\n"
+        f"分析：{str(si.get('impact_deduction', ''))[:1500]}"
+    )
+
+    client = _get_llm_client()
+    messages = [
+        {"role": "system", "content": (
+            "你是政策情报分析师。你的任务是比较一条已有政策文件的「历史摘要」和「最新报道」，"
+            "判断最新报道是否包含实质性的新信息。\n\n"
+            "「实质性新信息」的定义（满足任一即可）：\n"
+            "1. 政策状态变化（提案→通过→生效→暂停→修订→废止）\n"
+            "2. 出现新的量化条款（原文已有的数字不算、新的数字算）\n"
+            "3. 新的反对意见/国际反应/法律挑战/修订提案\n"
+            "4. 新的实施细节或配套措施（原文未披露过）\n"
+            "5. 影响范围扩大（新增受影响矿种、新国家反应等）\n\n"
+            "不视为实质性新信息：\n"
+            "- 同一事件的重复报道\n"
+            "- 不同来源对同一政策的类似描述\n"
+            "- 纯背景介绍/历史回顾\n\n"
+            "请仅返回 JSON：{\"has_material_change\": true/false, \"change_summary\": \"一句话说明变更（若无变更填空）\"}"
+        )},
+        {"role": "user", "content": (
+            f"【历史摘要】\n{old_summary}\n\n"
+            f"【最新报道】\n{new_text}\n\n"
+            "请判定最新报道是否包含实质性新信息。"
+        )},
+    ]
+
+    try:
+        response = client.chat_completion(
+            task_type="semantic_diff",
+            model="deepseek-v4-pro",
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            timeout=30,
+        )
+        content = response.choices[0].message.content
+        if content:
+            result = json.loads(content)
+            return {
+                "has_material_change": result.get("has_material_change", False),
+                "change_summary": result.get("change_summary", ""),
+            }
+    except Exception as e:
+        print(f"   ⚠️ 语义 Diff 异常: {e}")
+
+    return {"has_material_change": True, "change_summary": "Diff 失败，保守推送"}
+
+
+def _sync_baselines_to_notion(yaml_path):
+    """
+    v5.0: 将 knowledge_baselines.yaml 中的政策文件实体种子同步到 Notion。
+    已有的跳过，不存在的创建基础容器。
+    返回创建的条目数。
+    """
+    notion_token = os.environ.get("NOTION_TOKEN")
+    database_id = os.environ.get("NOTION_DATABASE_ID")
+    if not notion_token or not database_id or notion_token == "disabled":
+        return 0
+
+    if not os.path.isfile(yaml_path):
+        return 0
+
+    try:
+        with open(yaml_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f) or {}
+    except Exception:
+        return 0
+
+    headers = {
+        "Authorization": f"Bearer {notion_token}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+    }
+
+    doc_type_map = {
+        "Law": "法律 Law", "Regulation": "法规 Regulation",
+        "Policy": "政策 Policy", "Standard": "标准 Standard",
+        "Administrative_Order": "行政令 Admin_Order",
+    }
+
+    created = 0
+    baselines = config.get("baselines", {})
+    for country_code, entry in baselines.items():
+        if not entry or not entry.get("documents"):
+            continue
+
+        for doc in entry["documents"]:
+            official_name = doc.get("official_name", "").strip()
+            if not official_name:
+                continue
+
+            # 查重
+            exists, _ = _notion_search_pages(official_name)
+            if exists:
+                continue
+
+            # 构建 Notion 属性
+            properties = {
+                "政策名称": {"title": [{"text": {"content": official_name[:200]}}]},
+                "原名及出处": {"rich_text": [{"text": {"content": f"中文：{doc.get('chinese_name', '')}\n简称：{doc.get('short_name', '')}"}}]},
+                "颁布国家": {"select": {"name": country_code}},
+                "文件类型": {"select": {"name": doc_type_map.get(doc.get("type", "Other"), "其他 Other")}},
+                "处理状态": {"status": {"name": "监测中"}},
+                "核心分类": {"select": {"name": "宏观地缘与产业政策"}},
+                "关联报道数": {"number": 0},
+                "已告警（钉钉）": {"checkbox": False},
+                "核心条款摘要": {"rich_text": [{"text": {"content": f"【基线种子 · 待事件填充】\n{doc.get('baseline', '')}"[:2000]}}]},
+            }
+
+            if doc.get("effective_date"):
+                properties["生效日期"] = {"date": {"start": doc["effective_date"]}}
+                properties["发布日期"] = {"date": {"start": doc["effective_date"]}}
+            if doc.get("chinese_name"):
+                properties["要点摘要"] = {"rich_text": [{"text": {"content": f"{doc['chinese_name']} ({official_name[:50]})"}}]}
+
+            payload = {
+                "parent": {"database_id": database_id},
+                "properties": properties,
+            }
+
+            try:
+                res = requests.post(
+                    "https://api.notion.com/v1/pages",
+                    headers=headers, json=payload, timeout=10
+                )
+                if res.status_code == 200:
+                    print(f"  🌱 [基线种子] {doc.get('short_name', official_name[:50])}")
+                    created += 1
+                else:
+                    err = res.json().get("message", res.text)[:100]
+                    print(f"  ⚠️ 种子失败 [{doc.get('short_name', '')}]: {err}")
+            except Exception as e:
+                print(f"  ⚠️ 种子异常 [{doc.get('short_name', '')}]: {e}")
+
+    return created
 
 
 # ---- 标题增强：ISO 代码到中文国名映射 ----
@@ -944,6 +1379,45 @@ _CONFIDENCE_ZH_MAP = {
     "High": "高",
     "Medium": "中",
     "Low": "低",
+}
+
+# ---- v4.5: Notion 补充字段映射 ----
+_COUNTRY_TO_REGION = {
+    "CN": "中国 China", "ID": "印尼 Indonesia", "CD": "刚果（金）DRC",
+    "AU": "澳大利亚 Australia", "EU": "欧盟 EU", "US": "美国 USA",
+    "CL": "智利 Chile", "AR": "阿根廷 Argentina", "PH": "菲律宾 Philippines",
+    "ZW": "津巴布韦 Zimbabwe", "GH": "加纳 Ghana",
+    "GLOBAL": "全球 Global", "JP": "日本 Japan",
+}
+
+_MINERAL_TO_PRIMARY = {
+    "Lithium": "锂 Li", "Cobalt": "钴 Co", "Nickel": "镍 Ni",
+    "Copper": "铜 Cu", "Rare Earths": "稀土 REE", "Manganese": "锰 Mn",
+    # 中文别名（兜底）
+    "锂": "锂 Li", "钴": "钴 Co", "镍": "镍 Ni",
+    "铜": "铜 Cu", "稀土": "稀土 REE", "锰": "锰 Mn",
+}
+
+_IMPACT_TO_STATUS = {
+    "Low_Monitoring": "低 Low", "Moderate_Adjustment": "中 Medium",
+    "Medium_Impact": "中 Medium", "High_Disruption": "高 High",
+    "Critical_Disruption": "重大 Critical", "Critical": "重大 Critical",
+}
+
+_CATEGORY_TO_POLICY_TYPE = {
+    "Export_Ban": "出口/进口", "Export_Restriction": "出口/进口",
+    "Tariff": "税费/特许权", "Royalty": "税费/特许权", "Tax": "税费/特许权",
+    "Quota": "出口/进口", "Price_Control": "税费/特许权",
+    "Nationalization": "许可/矿权", "Foreign_Equity": "许可/矿权",
+    "Resource_Nationalism": "许可/矿权", "Supply_Nationalization": "许可/矿权",
+    "Beneficiation": "产业政策/补贴", "State_Procurement": "产业政策/补贴",
+    "Strategic_Stockpile": "产业政策/补贴", "Critical_Minerals_Strategy": "产业政策/补贴",
+    "Green_Subsidy": "产业政策/补贴", "IRA": "产业政策/补贴",
+    "Domestic_Supply_Obligation": "贸易/制裁", "Mandatory_Offtake": "贸易/制裁",
+    "Bulk_Purchasing": "贸易/制裁",
+    "Supply_Chain_Due_Diligence": "环保/ESG监管", "ESG_Regulation": "环保/ESG监管",
+    "Forced_Labor_Prevention": "环保/ESG监管", "Carbon_Border_Adjustment": "环保/ESG监管",
+    "Cross_Border_Compliance": "环保/ESG监管",
 }
 
 # ---- 推送显示：来源类型 → 中文 ----（v4.0）
@@ -1071,25 +1545,40 @@ def insert_to_notion(data, source_url):
 
     if not notion_token or not database_id or notion_token == "disabled":
         print("ℹ️ 暂未配置 Notion 凭证，跳过数据库沉淀阶段。")
-        return False
+        return {"is_new": False, "page_id": None}
 
     pd = data["policy_dynamics"]
     si = data["strategic_implications"]
     md = data["metadata"]
+    entity = data.get("policy_entity", {})
 
-    policy_name_zh = pd.get("policy_name_zh", "")
-    policy_name_original = pd.get("policy_name_original", "")
+    # v5.0: 去重主键 → official_name（绝对主键）
+    official_name = entity.get("official_name") or pd.get("policy_name_original", "")
+    chinese_name = entity.get("chinese_translation") or pd.get("policy_name_zh", "")
+    event_signature = pd.get("event_signature", "")
+    document_signature = pd.get("document_signature", "")
+    article_type = data.get("news_recency_verification", {}).get("article_type", "News_Report")
+    references_existing = data.get("news_recency_verification", {}).get("references_existing_document", False)
+    document_type = entity.get("document_type") or pd.get("document_type", "Other")
 
-    # ---- v3.1: 去重检查（使用原始标题，确保与旧记录兼容）----
-    exists, existing_page_id = _notion_search_pages(policy_name_zh, policy_name_original)
+    # ---- v5.0: 官方原名精确去重 ----
+    exists, existing_page_id = _notion_search_pages(official_name, chinese_name)
     if exists and existing_page_id:
-        return _notion_update_policy(existing_page_id, data, source_url)
+        if article_type in ("News_Report", "Analysis_Commentary", "Expert_Opinion"):
+            # 新闻报道：追加到此文件记录下，不创建新记录
+            _notion_append_news(existing_page_id, data, source_url, article_type)
+        else:
+            _notion_update_policy(existing_page_id, data, source_url)
+        return {"is_new": False, "page_id": existing_page_id}  # 已有文件，供语义 Diff 使用
 
-    # ---- v3.3: 情报级标题增强（仅用于 Notion 展示，不参与去重）----
-    enhanced_title = _enhance_policy_title(
-        policy_name_zh,
+    # ---- v5.0: Notion 标题使用官方原名（wiki 风格），增强标题作为展示名存入原名及出处 ----
+    wiki_title = official_name if official_name else (
+        chinese_name if chinese_name else pd.get("policy_name_zh", "未命名")
+    )
+    display_title = _enhance_policy_title(
+        chinese_name if chinese_name else wiki_title,
         md.get("country", ""),
-        pd.get("current_stage", ""),
+        entity.get("current_stage") or pd.get("current_stage", ""),
         md.get("mineral_types", []),
         md.get("issuing_authority", ""),
     )
@@ -1102,15 +1591,20 @@ def insert_to_notion(data, source_url):
         "Notion-Version": "2022-06-28"
     }
 
+    country_code = md.get("country", "")
+    mineral_types = md.get("mineral_types", [])
+    core_categories = pd.get("core_category", [])
+    impact_level = si.get("supply_chain_impact_level", "Low_Monitoring")
+
     properties = {
-        "政策名称":     {"title":       [{"text": {"content": enhanced_title}}]},
-        "原名及出处":   {"rich_text":   [{"text": {"content": policy_name_original}}]},
+        "政策名称":     {"title":       [{"text": {"content": wiki_title}}]},
+        "原名及出处":   {"rich_text":   [{"text": {"content": display_title}}]},
         "核心分类":     {"select":      {"name": data["notion_integration"]["master_tag"]}},
-        "颁布国家":     {"select":      {"name": md["country"]}},
+        "颁布国家":     {"select":      {"name": country_code}},
         "当前阶段":     {"select":      {"name": pd["current_stage"]}},
-        "冲击烈度":     {"select":      {"name": si["supply_chain_impact_level"]}},
-        "涉及矿种":     {"multi_select":[{"name": m} for m in md["mineral_types"]]},
-        "核心政策手段": {"multi_select":[{"name": c} for c in pd["core_category"]]},
+        "冲击烈度":     {"select":      {"name": impact_level}},
+        "涉及矿种":     {"multi_select":[{"name": m} for m in mineral_types]},
+        "核心政策手段": {"multi_select":[{"name": c} for c in core_categories]},
         "核心条款摘要": {"rich_text":   [{"text": {"content": str(pd["substantive_provisions"])[:2000]}}]},
         "原文链接":     {"url":          source_url},
         "DeepSeek 结构化分析": {"rich_text": [{"text": {"content": si["impact_deduction"][:4000]}}]},
@@ -1119,6 +1613,70 @@ def insert_to_notion(data, source_url):
     # v3.1: 政策维度标签
     if pd.get("policy_dimension"):
         properties["政策维度"] = {"select": {"name": pd["policy_dimension"]}}
+
+    # ---- v4.5: 补充字段全面填充 ----
+
+    # 覆盖地区（多选）：ISO 国家码 → Notion 选项名
+    region_name = _COUNTRY_TO_REGION.get(country_code)
+    if region_name:
+        properties["覆盖地区"] = {"multi_select": [{"name": region_name}]}
+
+    # 主矿种（单选）：第一个目标矿种
+    if mineral_types:
+        primary = _MINERAL_TO_PRIMARY.get(mineral_types[0])
+        if primary:
+            properties["主矿种（可选）"] = {"select": {"name": primary}}
+
+    # 处理状态：冲击烈度 → Notion 状态
+    status_name = _IMPACT_TO_STATUS.get(impact_level)
+    if status_name:
+        properties["处理状态"] = {"status": {"name": status_name}}
+
+    # 政策类型：从核心政策手段的首个匹配项推导
+    for cat in core_categories:
+        ptype = _CATEGORY_TO_POLICY_TYPE.get(cat)
+        if ptype:
+            properties["政策类型（可选）"] = {"select": {"name": ptype}}
+            break
+
+    # 要点摘要：条款摘要缩至 300 字
+    provisions_text = str(pd.get("substantive_provisions", ""))
+    if provisions_text:
+        properties["要点摘要"] = {"rich_text": [{"text": {"content": provisions_text[:300]}}]}
+
+    # 发布机构（v4.5: 修复字段名 — DB 中是"发布机构"不是"颁布机构"）
+    issuing_authority = md.get("issuing_authority", "")
+    if issuing_authority:
+        properties["发布机构"] = {"rich_text": [{"text": {"content": issuing_authority}}]}
+
+    # 发布日期：同生效日期逻辑，但使用 declared_publish_year 作 fallback
+    publish_date = (pd.get("effective_date") or "").strip()
+    if not publish_date or publish_date.lower() == "null":
+        declared_year = data.get("news_recency_verification", {}).get("declared_publish_year")
+        if declared_year and isinstance(declared_year, int) and 2020 <= declared_year <= 2030:
+            publish_date = f"{declared_year}-06-01"
+    if publish_date and publish_date.lower() != "null":
+        properties["发布日期"] = {"date": {"start": publish_date}}
+
+    # v4.5: 文件类型 + 文件签名（去重主键）
+    if document_type and document_type != "Other":
+        doc_type_label = {
+            "Law": "法律 Law", "Regulation": "法规 Regulation",
+            "Policy": "政策 Policy", "Standard": "标准 Standard",
+            "Administrative_Order": "行政令 Admin_Order",
+        }.get(document_type, "其他 Other")
+        properties["文件类型"] = {"select": {"name": doc_type_label}}
+    if document_signature:
+        properties["文件签名"] = {"rich_text": [{"text": {"content": document_signature}}]}
+    if event_signature:
+        properties["事件签名"] = {"rich_text": [{"text": {"content": event_signature}}]}
+
+    # 关联报道数：新建文件默认为 1（首次发现），报道类递增
+    properties["关联报道数"] = {"number": 1}
+    properties["最后报道日期"] = {"date": {"start": datetime.now(timezone.utc).strftime("%Y-%m-%d")}}
+
+    # 已告警（钉钉）：新建默认未告警
+    properties["已告警（钉钉）"] = {"checkbox": False}
 
     # v4.0: 事实依据（factual_basis）—— 写入 Notion 新列
     factual_basis = pd.get("factual_basis", "")
@@ -1135,24 +1693,21 @@ def insert_to_notion(data, source_url):
     if baseline:
         properties["产业基线"] = {"rich_text": [{"text": {"content": str(baseline)[:4000]}}]}
 
-    # v3.5: 颁布机构（需 Notion 数据库先手动添加"颁布机构"列，否则设为 false 跳过）
-    if os.environ.get("NOTION_HAS_AUTHORITY_FIELD", "").lower() == "true":
-        issuing_authority = md.get("issuing_authority", "")
-        if issuing_authority:
-            properties["颁布机构"] = {"rich_text": [{"text": {"content": issuing_authority}}]}
-
-    # v3.5: 时效性熔断标签 —— 若被标记为旧闻回顾，标题前缀加 ⏳，冲击烈度覆写为 Low_Monitoring
+    # v4.5: 状态标签（替代 emoji 前缀）—— 通过「处理状态」字段表达，不污染标题
     if data.get("_stale_flag"):
-        properties["政策名称"] = {"title": [{"text": {"content": f"⏳ {enhanced_title}"}}]}
         properties["冲击烈度"] = {"select": {"name": "Low_Monitoring"}}
+        properties["处理状态"] = {"status": {"name": "低 Low"}}
 
-    # v4.0: 待核标记 —— 低置信度/程序性说明/数字净化检出时，加 📝 待核前缀提醒人工复核
     if data.get("_review_flag") and not data.get("_stale_flag"):
-        properties["政策名称"] = {"title": [{"text": {"content": f"📝 {enhanced_title}"}}]}
-        print("📝 [待核] 标题已加 📝 前缀，入库后需人工复核。")
+        properties["处理状态"] = {"status": {"name": "待评估"}}
+        print("📝 [待核] 已标记为「待评估」状态，入库后需人工复核。")
 
-    # 动态注入生效日期（拦截空值防 Notion 报错）
+    # v4.4: 生效日期
     effective_date = (pd.get("effective_date") or "").strip()
+    if not effective_date or effective_date.lower() == "null":
+        declared_year = data.get("news_recency_verification", {}).get("declared_publish_year")
+        if declared_year and isinstance(declared_year, int) and 2020 <= declared_year <= 2030:
+            effective_date = f"{declared_year}-06-01"
     if effective_date and effective_date.lower() != "null":
         properties["生效日期"] = {"date": {"start": effective_date}}
 
@@ -1195,16 +1750,47 @@ def insert_to_notion(data, source_url):
     }
 
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=10)
-        if res.status_code == 200:
-            print("🚀 [Notion] 成功打标并持久化沉淀至高管数据库看板。")
-            return True
-        else:
-            print(f"⚠️ [Notion] 写入失败，状态码: {res.status_code}, 详情: {res.text[:300]}")
-            return False
+        res_page_id = _notion_api_post(url, headers, payload)
+        if res_page_id:
+            return {"is_new": True, "page_id": res_page_id}
+        return {"is_new": False, "page_id": None}
     except Exception as e:
         print(f"❌ [Notion] 连接异常: {str(e)}")
-        return False
+        return {"is_new": False, "page_id": None}
+
+
+def _notion_api_post(url, headers, payload, retry_stripping=True):
+    """发送 Notion API 请求，自动处理字段缺失错误并重试"""
+    import re
+    res = requests.post(url, headers=headers, json=payload, timeout=10)
+    if res.status_code == 200:
+        print("🚀 [Notion] 成功打标并持久化沉淀至高管数据库看板。")
+        return res.json().get("id", "")
+
+    err_text = res.text[:500]
+    # v4.3: 若 Notion 数据库缺少某些属性列，自动剔除后重试
+    if retry_stripping and res.status_code == 400 and "is not a property that exists" in err_text:
+        missing_props = set(re.findall(r'([^\s."]+) is not a property that exists', err_text))
+        if missing_props:
+            stripped = {}
+            removed = []
+            for k, v in payload.get("properties", {}).items():
+                if k in missing_props:
+                    removed.append(k)
+                else:
+                    stripped[k] = v
+            payload["properties"] = stripped
+            # Also strip from children blocks if baseline was removed
+            if "产业基线" in missing_props:
+                payload["children"] = [
+                    b for b in payload.get("children", [])
+                    if b.get("type") != "heading_2" or "产业基线" not in str(b.get("heading_2", {}).get("rich_text", [{}])[0].get("text", {}).get("content", ""))
+                ]
+            print(f"⚠️ [Notion] 数据库缺少字段: {', '.join(removed)}，已自动移除后重试。")
+            return _notion_api_post(url, headers, payload, retry_stripping=False)
+
+    print(f"⚠️ [Notion] 写入失败，状态码: {res.status_code}, 详情: {err_text}")
+    return False
 
 
 def _fmt_provisions(text):
@@ -1230,131 +1816,6 @@ def _fmt_provisions(text):
         if cleaned:
             bullets.append(f"- {cleaned}")
     return "\n".join(bullets)
-
-
-def send_dingtalk_alert(data, source_url):
-    """【高能时效触达】通过钉钉 Webhook 发送高管宏观视野告警"""
-    webhook_url = os.environ.get("DINGTALK_WEBHOOK")
-    if not webhook_url or webhook_url == "disabled":
-        print("ℹ️ 暂未配置钉钉 Webhook，跳过告警触达阶段。")
-        return
-
-    # 加签模式：若配置了 DINGTALK_SECRET，则计算签名并拼接到 URL
-    dingtalk_secret = os.environ.get("DINGTALK_SECRET")
-    if dingtalk_secret:
-        timestamp = str(round(time.time() * 1000))
-        string_to_sign = f"{timestamp}\n{dingtalk_secret}"
-        hmac_code = hmac.new(
-            dingtalk_secret.encode("utf-8"),
-            string_to_sign.encode("utf-8"),
-            digestmod=hashlib.sha256,
-        ).digest()
-        sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
-        webhook_url = f"{webhook_url}&timestamp={timestamp}&sign={sign}"
-
-    impact = data["strategic_implications"].get("supply_chain_impact_level", "")
-    alert_required = data["notion_integration"].get("dingtalk_alert_required", False)
-
-    # 🛑 硬锁 1：物理静默 — Low_Monitoring 永不推送（不管 LLM 怎么填 dingtalk_alert_required）
-    if impact == "Low_Monitoring":
-        print(f"🤫 [静默入库] 政策真实但烈度为 Low_Monitoring，仅入库 Notion 不推钉钉。")
-        return
-
-    # 🛑 硬锁 2：LLM 判定门控
-    if not alert_required:
-        print("ℹ️ LLM 判定本条政策未达到告警阈值，防打扰过滤。")
-        return
-
-    headers = {"Content-Type": "application/json"}
-
-    pd = data['policy_dynamics']
-    si = data['strategic_implications']
-    md = data['metadata']
-
-    # v3.1: 在告警中展示政策维度
-    dimension_label = pd.get('policy_dimension', '')
-    dimension_line = f"\n\n**🏷️ 政策维度**：`{_fmt_dimension(dimension_label)}`" if dimension_label else ""
-
-    # 冲击烈度 emoji 映射（替代不生效的 <font> 标签）
-    impact_emoji = {
-        "High_Disruption": "🔴🔴",
-        "Moderate_Adjustment": "🟡",
-        "Low_Monitoring": "🟢",
-    }
-    impact_level = si.get('supply_chain_impact_level', '')
-    impact_badge = f"{impact_emoji.get(impact_level, '⚪')} **{_fmt_impact(impact_level)}**"
-
-    # v4.0: 置信度展示
-    confidence = si.get("analytic_confidence", "Low")
-    confidence_emoji_map = {"High": "🟢", "Medium": "🟡", "Low": "🔴"}
-    confidence_zh = _CONFIDENCE_ZH_MAP.get(confidence, confidence)
-
-    # 条款拆解 → 要点列表（精简信息密度）
-    provisions_raw = pd.get('substantive_provisions', '')
-    provisions_bullets = _fmt_provisions(provisions_raw)
-
-    # v4.0: 事实依据（factual_basis）—— 溯源锚点
-    factual_basis = pd.get("factual_basis", "")
-    factual_block = f"\n> 📎 原文依据：{factual_basis}" if factual_basis else ""
-
-    # v4.1: 产业基线（industry_baseline_recall）—— 常识锚点
-    baseline = si.get("industry_baseline_recall", "")
-    # v4.2: 范式转移特殊渲染
-    if data.get("_paradigm_shift"):
-        baseline_block = (
-            f"\n\n**⚓ 产业基线** ｜ ⚠️【历史基线已被打破】\n\n"
-            f"> {baseline[:300]}\n"
-            f"> 🚨 本次情报揭示了对旧基线的颠覆性变化，请优先参考上方分析层。"
-        ) if baseline else ""
-    else:
-        baseline_block = (
-            f"\n\n**⚓ 产业基线**（行业共识 · CoT 常识锚）\n\n"
-            f"> {baseline[:300]}"
-        ) if baseline else ""
-
-    # v3.5: 颁布机构（双保险 —— 即使 LLM 标题里缺主语，卡片上也能看到）
-    authority = md.get('issuing_authority', '')
-    authority_line = f"\n   🏛️ 颁布机构：{authority}" if authority else ""
-
-    # v4.0: 数字净化警示
-    numbers_flagged = data.get("_numbers_flagged", 0)
-    sanitize_warning = ""
-    if numbers_flagged:
-        sanitize_warning = f"\n⚠️ 系统已标记 {numbers_flagged} 处疑似捏造数字（见(待核)标记），请人工核实。"
-
-    markdown_text = (
-        f"### 📡 宏观政策雷达 · 政策预警\n\n"
-        f"**📌 政策法案**：{pd.get('policy_name_zh') or '(未命名)'} ({pd.get('policy_name_original', '')}){authority_line}\n\n"
-        f"**🌍 影响范围**：{_fmt_country(md['country'])} ｜ 矿种 {_fmt_minerals(md['mineral_types'])}"
-        f"{dimension_line}\n\n"
-        f"**⚖️ 法律阶段**：{_fmt_stage(pd['current_stage'])} ｜ 生效日 {pd.get('effective_date') or '未定'}\n\n"
-        f"**🚨 冲击烈度**：{impact_badge} ｜ {confidence_emoji_map.get(confidence, '⚪')} 置信度：{confidence_zh}\n\n"
-        f"━━━━━━━━━━━━━━\n\n"
-        f"#### 📜 事实层（原文可核）\n\n"
-        f"{provisions_bullets}{factual_block}{baseline_block}\n\n"
-        f"#### 🔮 分析层 ｜ 置信度：{confidence_zh}\n\n"
-        f"> {si.get('impact_deduction', '')}{sanitize_warning}\n\n"
-        f"━━━━━━━━━━━━━━\n\n"
-        f"🔗 [查看原文]({source_url})\n\n"
-        f"📋 本条目已同步存入 Notion。📜 事实层=原文可核 · ⚓ 基线=行业共识 · 🔮 分析层=分析师推演。"
-    )
-
-    payload = {
-        "msgtype": "markdown",
-        "markdown": {
-            "title": f"📡 宏观政策雷达: {_fmt_country(md['country'])} 重磅预警",
-            "text": markdown_text
-        }
-    }
-
-    try:
-        res = requests.post(webhook_url, headers=headers, json=payload, timeout=10)
-        if res.status_code == 200:
-            print("🔔 [钉钉] 高管重磅战略预警卡片推送成功。")
-        else:
-            print(f"⚠️ [钉钉] 推送失败，详情: {res.text[:200]}")
-    except Exception as e:
-        print(f"❌ [钉钉] 推送异常: {str(e)}")
 
 
 def send_dingtalk_digest(policies):
@@ -1397,79 +1858,34 @@ def send_dingtalk_digest(policies):
         "Low_Monitoring": "🟢",
     }
 
-    # 构建每条政策的 markdown 区块（v4.0 三层结构：事实层 / 分析层 / 溯源）
+    # v5.1: 精简卡片——entity + event_summary + impact + source
     blocks = []
     for i, (data, source_url) in enumerate(policies_sorted, 1):
-        pd_data = data.get("policy_dynamics", {})
-        si_data = data.get("strategic_implications", {})
-        md_data = data.get("metadata", {})
+        entity = data.get("policy_entity", {}) or {}
+        event = data.get("event_update", {}) or {}
+        md_data = data.get("metadata", {}) or {}
+        si_data = data.get("strategic_implications", {}) or {}
 
-        dimension_label = pd_data.get("policy_dimension", "")
-        dimension_line = f" ｜ 🏷️ {_fmt_dimension(dimension_label)}" if dimension_label else ""
-
-        impact_level = si_data.get("supply_chain_impact_level", "")
-        impact_badge = f"{impact_emoji.get(impact_level, '⚪')} **{_fmt_impact(impact_level)}**"
-
-        # v4.0: 置信度 + 来源类型展示
-        confidence = si_data.get("analytic_confidence", "Low")
-        confidence_emoji = {"High": "🟢", "Medium": "🟡", "Low": "🔴"}.get(confidence, "⚪")
-        confidence_zh = _CONFIDENCE_ZH_MAP.get(confidence, confidence)
-        source_type = md_data.get("policy_source_type", "")
-        source_type_zh = _SOURCE_TYPE_ZH_MAP.get(source_type, source_type)
-        confidence_line = f" ｜ {confidence_emoji} 置信度：{confidence_zh} ｜ 📰 {source_type_zh or '未分类'}"
-
-        provisions_raw = pd_data.get("substantive_provisions", "")
-        provisions_bullets = _fmt_provisions(provisions_raw)
-
-        # v4.0: 事实依据（factual_basis）—— 溯源锚点
-        factual_basis = pd_data.get("factual_basis", "")
-        factual_block = f"\n   > 📎 原文依据：{factual_basis}" if factual_basis else ""
-
-        # v4.1: 产业基线（industry_baseline_recall）—— 常识锚点
-        baseline = si_data.get("industry_baseline_recall", "")
-        # v4.2: 范式转移特殊渲染
-        if data.get("_paradigm_shift"):
-            baseline_block = (
-                f"   \n"
-                f"   **⚓ 产业基线 ｜ ⚠️【历史基线已被打破】**\n"
-                f"   > {baseline[:300]}\n"
-                f"   > 🚨 本次情报揭示了对旧基线的颠覆性变化，请优先参考上方分析层。\n"
-            ) if baseline else ""
-        else:
-            baseline_block = (
-                f"   \n"
-                f"   **⚓ 产业基线（行业共识 · CoT 常识锚）**\n"
-                f"   > {baseline[:300]}\n"
-            ) if baseline else ""
-
-        authority = md_data.get("issuing_authority", "")
-        authority_line = f"\n   🏛️ 颁布机构：{authority}" if authority else ""
-
-        # v4.0: 数字净化警示
-        numbers_flagged = data.get("_numbers_flagged", 0)
-        sanitize_warning = ""
-        if numbers_flagged:
-            sanitize_warning = f"\n   ⚠️ 系统已标记 {numbers_flagged} 处疑似捏造数字（见下文(待核)），请人工核实。"
+        # 分类标签
+        ec = event.get("event_classification", "")
+        alert_label = "🆕 新政策出台" if ec == "New_Policy_Issuance" else "🔄 法案重大推进"
 
         block = (
-            f"#### 📌 #{i} {pd_data.get('policy_name_zh') or '(未命名)'}\n"
-            f"   📝 {pd_data.get('policy_name_original', '')}{authority_line}\n"
-            f"   🌍 {_fmt_country(md_data.get('country', '?'))} ｜ 矿种 {_fmt_minerals(md_data.get('mineral_types', []))}"
-            f"{dimension_line}\n"
-            f"   ⚖️ {_fmt_stage(pd_data.get('current_stage', '?'))} ｜ 生效 {pd_data.get('effective_date') or '未定'} ｜ {impact_badge}{confidence_line}\n"
-            f"   \n"
-            f"   **📜 事实层（原文可核）**\n"
-            f"   {provisions_bullets}{factual_block}"
-            f"{baseline_block}\n"
-            f"   **🔮 分析层** ｜ 置信度：{confidence_zh}\n"
-            f"   > {si_data.get('impact_deduction', '')[:400]}{sanitize_warning}\n"
-            f"   [🔗 查看原文]({source_url})"
+            f"#### {alert_label} #{i}：{entity.get('chinese_translation') or entity.get('official_name') or '(未命名)'}\n"
+            f"> 🌍 {_fmt_country(md_data.get('country', '?'))} ｜ 矿种 {_fmt_minerals(md_data.get('mineral_types', []))}\n"
+            f"> 📜 {entity.get('official_name', '')[:200]}\n"
+            f"---\n"
+            f"**🚨 本次动态 (What Happened)**\n"
+            f"> {event.get('event_summary', '')[:300]}\n\n"
+            f"**🔮 战略推演 (Directional Impact)**\n"
+            f"> {event.get('event_impact_deduction', si_data.get('impact_deduction', ''))[:300]}\n\n"
+            f"🔗 [溯源原文]({source_url})"
         )
         blocks.append(block)
 
     combined_body = "\n\n---\n\n".join(blocks)
-    header = f"### 📡 宏观政策雷达 · 本期共 {n} 条政策预警（已通过事实-分析双闸门）"
-    full_text = f"{header}\n\n{combined_body}\n\n━━━━━━━━━━━━━━\n📋 本报告已同步存入 Notion 情报资产库。📜 事实层=原文可核，🔮 分析层=分析师推演，请据此分层决策。"
+    header = f"### 📡 宏观政策雷达 · 本期 {n} 条预警"
+    full_text = f"{header}\n\n{combined_body}\n\n━━━\n📋 已同步存入 Notion 情报资产库。全文时间轴请查看对应文件页面。"
 
     # 分片保护：钉钉 markdown 单条约 5000 字，保守按 4500 截断
     MAX_CHUNK = 4500
@@ -1521,6 +1937,11 @@ if __name__ == "__main__":
     print(f"🛡️ 熔断配置: 最大AI调用={MAX_AI_CALLS} | 连续空转上限={MAX_CONSECUTIVE_EMPTY} | 最小文本长度={MIN_TEXT_LENGTH}")
     print(f"📚 基线知识库已加载，覆盖 {len(baselines)} 个国家，最后更新: {baseline_updated}")
 
+    # v5.0: 同步基线政策文件实体到 Notion（种子容器）
+    synced = _sync_baselines_to_notion(os.path.join(PROJECT_DIR, "knowledge_baselines.yaml"))
+    if synced:
+        print(f"🌱 [基线同步] 本次新创建 {synced} 个政策文件容器。")
+
     # v4.3: 基线覆盖率交叉校验
     source_countries = {s["country"] for s in all_active_sources if s.get("country") != "GLOBAL"}
     baseline_countries = set(baselines.keys())
@@ -1538,6 +1959,10 @@ if __name__ == "__main__":
 
     # v3.5: 收集本轮所有通过门控的政策，循环结束后合并为单条摘要推送
     pending_alerts = []
+
+    # v5.1: 按国家分组排序 → 同国源连续处理 → DeepSeek Context Cache 前缀复用最大化
+    all_active_sources.sort(key=lambda s: s.get("country", "GLOBAL"))
+    print(f"🔀 [缓存优化] 情报源已按国家分组排序，最大化 Context Cache 前缀复用。")
 
     for source in all_active_sources:
         source_notes = source.get("notes", "")
@@ -1606,13 +2031,12 @@ if __name__ == "__main__":
         if is_likely_old:
             print(f"   ⚠️ [预扫] 文本中最高年份为 {_max_year} → 疑似历史回顾文章，后续将交叉校验。")
 
-        # v4.2: 按 source country 注入基线知识到 prompt（让 LLM 融合 YAML 基线 + 自身训练数据）
+        # v5.1: 基线注入作为独立 system 消息传入（不再拼入 fetched_text）
+        # → DeepSeek Context Cache 可跨调用复用基线前缀
         source_country = source.get("country", "GLOBAL")
         baseline_injection = _inject_baseline(source_country, baselines, baseline_updated)
-        if baseline_injection:
-            fetched_text = fetched_text + baseline_injection
 
-        analysis_result = extract_macro_policy(fetched_text, schema)
+        analysis_result = extract_macro_policy(fetched_text, schema, baseline_injection)
         ai_call_count += 1
 
         if analysis_result:
@@ -1699,12 +2123,7 @@ if __name__ == "__main__":
                 print("   若确认为范式转移，请编辑 YAML 并更新 last_updated 时间戳。")
                 analysis_result["_paradigm_shift"] = True
 
-            # ---- v4.0: 双闸门推送判定（替代原有简单烈度判断） ----
-            should_push, push_reason = _should_push(
-                analysis_result, fetched_text=fetched_text, source_depth=source_depth
-            )
-
-            # ---- v4.0: 待核标记（非推送但有信息不足的情况，入库时加前缀提醒人工复核）----
+            # ---- v4.0: 待核标记 ----
             pd_check = analysis_result.get("policy_dynamics", {}) or {}
             needs_review = (
                 si_check.get("analytic_confidence") == "Low"
@@ -1714,14 +2133,32 @@ if __name__ == "__main__":
             if needs_review and not analysis_result.get("_stale_flag"):
                 analysis_result["_review_flag"] = True
 
-            insert_to_notion(analysis_result, source_url)
+            # v4.5: 先入库 → 语义 Diff → 推送判定
+            insert_result = insert_to_notion(analysis_result, source_url)
+            is_new_doc = insert_result.get("is_new", False)
+            page_id = insert_result.get("page_id")
 
-            # v4.0: 推送队列（双闸门替代简单烈度判断）
+            # 已有文件的报道 → 语义 Diff 判定是否有质变
+            material_change = None
+            if not is_new_doc and page_id:
+                material_change = _semantic_diff(page_id, analysis_result)
+                analysis_result["_material_change"] = material_change
+                if material_change.get("has_material_change"):
+                    print(f"🔍 [语义Diff] 检测到质变：{material_change.get('change_summary', '')[:80]}")
+                else:
+                    print(f"🔇 [语义Diff] 无质变，MUTE。")
+
+            # ---- v4.5: 文档生命周期推送判定 ----
+            should_push, push_reason = _should_push(
+                analysis_result, fetched_text=fetched_text,
+                source_depth=source_depth, is_new_document=is_new_doc
+            )
+
             if should_push:
                 pending_alerts.append((analysis_result, source_url))
-                print(f"🚨 [双闸门] 通过推送判定：{push_reason}")
+                print(f"🚨 [推送] {push_reason}")
             else:
-                print(f"🤫 [静默入库] 未通过双闸门：{push_reason}。仅入库 Notion。")
+                print(f"🤫 [静默入库] {push_reason}")
 
     # ---- v3.5: 汇总推送 ----
     if pending_alerts:
@@ -1729,3 +2166,6 @@ if __name__ == "__main__":
         send_dingtalk_digest(pending_alerts)
     else:
         print("\nℹ️ 本轮无政策达到钉钉推送阈值。")
+
+    # v5.0: 输出缓存命中统计
+    _get_llm_client().print_stats()

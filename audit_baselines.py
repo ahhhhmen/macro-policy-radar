@@ -23,7 +23,7 @@ import yaml
 import time
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from openai import OpenAI
+from llm_cache import get_cached_client
 
 load_dotenv()
 
@@ -40,13 +40,9 @@ BASELINE_PATH = os.path.join(PROJECT_DIR, "knowledge_baselines.yaml")
 #  复用 main.py 的抓取基础设施（最小化导入，避免循环依赖）
 # =============================================================================
 
-def _get_deepseek_client():
-    return OpenAI(
-        api_key=os.environ.get("OPENAI_API_KEY"),
-        base_url=os.environ.get("OPENAI_BASE_URL", "https://api.deepseek.com"),
-        max_retries=1,
-        timeout=60,
-    )
+def _get_llm_client():
+    """获取全局 CachedLLMClient 单例（v5.0: 缓存命中优化）"""
+    return get_cached_client()
 
 
 def _resolve_google_news_url(google_url):
@@ -186,7 +182,8 @@ def _audit_single_country(country_code, country_name, rules, client):
     rules_text = "\n".join(f"  [{i}] {r}" for i, r in enumerate(rules))
 
     try:
-        response = client.chat.completions.create(
+        response = client.chat_completion(
+            task_type="baseline_audit",
             model="deepseek-v4-pro",
             messages=[
                 {"role": "system", "content": _AUDIT_SYSTEM_PROMPT},
@@ -200,7 +197,7 @@ def _audit_single_country(country_code, country_name, rules, client):
                 },
             ],
             response_format={"type": "json_object"},
-            temperature=0.1,
+            temperature=0.0,  # v5.0: 确定性输出 → 提升缓存命中率
             timeout=60,
         )
         content = response.choices[0].message.content
@@ -292,7 +289,7 @@ if __name__ == "__main__":
             print(f"❌ 国家代码 {code} 不在基线库中。")
             sys.exit(1)
         entry = baselines[code]
-        client = _get_deepseek_client()
+        client = _get_llm_client()
         result = _audit_single_country(code, entry["country"], entry["rules"], client)
         if result["changed"]:
             _print_ci_warning(f"基线异动: {result['report']}")
@@ -300,7 +297,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     # 全量审计模式
-    client = _get_deepseek_client()
+    client = _get_llm_client()
     all_ok = True
     changes_found = []
 
@@ -334,3 +331,6 @@ if __name__ == "__main__":
             f"{len(changes_found)} 个国家基线可能过期，请人工核实后编辑 knowledge_baselines.yaml。"
         )
     print("=" * 60)
+    
+    # v5.0: 输出缓存命中统计
+    _get_llm_client().print_stats()

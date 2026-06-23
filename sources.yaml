@@ -1,4 +1,4 @@
-version: "3.2"
+version: "5.3"
 
 # =====================================================================
 #  三层寻源架构（v3.2 中文政策信号增强版）
@@ -26,6 +26,10 @@ query_matrix:
     - Copper
     - "Rare Earths"
     - Graphite
+    - Tungsten
+    - Gallium
+    - Germanium
+    - Indium
   policy_keywords:
     # 传统贸易壁垒类（保留）
     - "Export Ban"
@@ -258,6 +262,42 @@ macro_sources:
     dom_selector: "body"
     enabled: true
     notes: "EU Critical Raw Materials Act / CBAM 碳边境调节等政策来源"
+
+  # ---- v5.3: G7/全球多边政策 ----
+  - id: "g7_critical_minerals_rss"
+    country: "GLOBAL"
+    agency: "G7关键矿产政策-RSS专线"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=G7+%22critical+minerals%22+alliance+%22supply+chain%22+%22rare+earths%22&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+    notes: "v5.3 新增：G7关键矿产联盟、供应链韧性、对华依赖降低等政策"
+
+  # ---- v5.3: 印尼政策 RSS 补充（HTML源常超时，RSS兜底） ----
+  - id: "id_nickel_policy_rss"
+    country: "ID"
+    agency: "印尼镍矿政策-RSS专线"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=Indonesia+nikel+OR+nickel+ESDM+OR+RKAB+OR+Danantara+OR+DSI+export+policy+2026&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+    notes: "v5.3 新增：印尼镍矿政策RSS兜底 — ESDM/Danantara/DSI/RKAB等关键政策"
+
+  # ---- v5.3: 中国商务部公告 RSS 补充（两用物项/出口管制） ----
+  - id: "cn_export_control_rss"
+    country: "CN"
+    agency: "中国出口管制-RSS专线"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=China+%22export+control%22+OR+%E5%87%BA%E5%8F%A3%E7%AE%A1%E5%88%B6+%22critical+minerals%22+OR+%E5%85%B3%E9%94%AE%E7%9F%BF%E4%BA%A7+MOFCOM+OR+%E5%95%86%E5%8A%A1%E9%83%A8&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+    notes: "v5.3 新增：中国出口管制/两用物项/商务部公告 — 覆盖稀土/钨/镓/锗等管制清单"
+
+  # ---- v5.3: EU关键原材料法案 RSS 补充 ----
+  - id: "eu_crma_rss"
+    country: "EU"
+    agency: "EU关键原材料法案-RSS专线"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=EU+%22Critical+Raw+Materials+Act%22+CRMA+%22strategic+raw+materials%22&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+    notes: "v5.3 新增：EU CRMA/战略原材料/关键矿产供应链等政策补充"
 
   # ---- 西语区（拉美矿产政策）----
   - id: "latam_policy_rss_es"

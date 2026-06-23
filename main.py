@@ -30,13 +30,13 @@ NEWSAPI_PAGE_SIZE = int(os.environ.get("NEWSAPI_PAGE_SIZE", "5"))
 # v3.3 熔断机制：单轮最大 AI 调用次数（控制成本，0=不限）
 MAX_AI_CALLS = int(os.environ.get("MAX_AI_CALLS", "8"))
 # v3.3 熔断：连续空转上限，达到后跳过后续同 feed_type 源
-MAX_CONSECUTIVE_EMPTY = int(os.environ.get("MAX_CONSECUTIVE_EMPTY", "5"))
+MAX_CONSECUTIVE_EMPTY = int(os.environ.get("MAX_CONSECUTIVE_EMPTY", "10"))
 # v3.3 预筛选：文本最短字符数（低于此值跳过 AI，节省 token）
 MIN_TEXT_LENGTH = int(os.environ.get("MIN_TEXT_LENGTH", "300"))
 # v3.1: RSS 兜底覆盖的语言（Google News 支持多语言，不受 API 频率限制）
 RSS_FALLBACK_LANGUAGES = os.environ.get("RSS_FALLBACK_LANGUAGES", "en,zh,id").split(",")
 # v3.5: RSS 文章发布日期硬过滤窗口（天）—— 超过此天数的旧文直接丢弃
-RSS_MAX_AGE_DAYS = int(os.environ.get("RSS_MAX_AGE_DAYS", "14"))
+RSS_MAX_AGE_DAYS = int(os.environ.get("RSS_MAX_AGE_DAYS", "30"))
 
 def load_schema(schema_path):
     """加载认知滤网 Schema"""
@@ -2017,9 +2017,20 @@ if __name__ == "__main__":
     # v3.5: 收集本轮所有通过门控的政策，循环结束后合并为单条摘要推送
     pending_alerts = []
 
-    # v5.1: 按国家分组排序 → 同国源连续处理 → DeepSeek Context Cache 前缀复用最大化
-    all_active_sources.sort(key=lambda s: s.get("country", "GLOBAL"))
-    logger.info(f"🔀 [缓存优化] 情报源已按国家分组排序，最大化 Context Cache 前缀复用。")
+    # v5.3: 轮询交错排序 → 不同国家源交替处理，防止同国连续触发熔断
+    # 按国家分组后 round-robin 取出，确保熔断前每个国家都有机会被扫描
+    country_buckets: dict[str, list[dict]] = {}
+    for s in all_active_sources:
+        country_buckets.setdefault(s.get("country", "GLOBAL"), []).append(s)
+    interleaved: list[dict] = []
+    max_bucket = max(len(b) for b in country_buckets.values())
+    for i in range(max_bucket):
+        for country in sorted(country_buckets.keys()):
+            bucket = country_buckets[country]
+            if i < len(bucket):
+                interleaved.append(bucket[i])
+    all_active_sources = interleaved
+    logger.info(f"🔀 [轮询交错] {len(country_buckets)} 个国家的情报源已交错排列，避免同国连续触发熔断。")
 
     for source in all_active_sources:
         source_notes = source.get("notes", "")

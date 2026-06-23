@@ -28,7 +28,7 @@ NEWSAPI_LANGUAGES = os.environ.get("NEWSAPI_LANGUAGES", "en").split(",")
 # v3.1: 每语言最大返回文章数
 NEWSAPI_PAGE_SIZE = int(os.environ.get("NEWSAPI_PAGE_SIZE", "5"))
 # v3.3 熔断机制：单轮最大 AI 调用次数（控制成本，0=不限）
-MAX_AI_CALLS = int(os.environ.get("MAX_AI_CALLS", "8"))
+MAX_AI_CALLS = int(os.environ.get("MAX_AI_CALLS", "15"))
 # v3.3 熔断：连续空转上限，达到后跳过后续同 feed_type 源
 MAX_CONSECUTIVE_EMPTY = int(os.environ.get("MAX_CONSECUTIVE_EMPTY", "10"))
 # v3.3 预筛选：文本最短字符数（低于此值跳过 AI，节省 token）

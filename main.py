@@ -1536,7 +1536,7 @@ def _fmt_dimension(dim):
 def _strip_sanitizer_markers(text: str) -> str:
     """移除数字净化标记 ⚠️XX(待核)，用于推送卡片（Notion 保留标记供人工复核）。"""
     import re
-    return re.sub(r"⚠️[\d.,%]+\(待核\)", r"\1", text)
+    return re.sub(r"⚠️\d[\d.,%]*(?:\(待核\))", "", text)
 
 
 def _fmt_authority(name: str) -> str:

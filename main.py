@@ -1226,19 +1226,22 @@ def _notion_append_news(page_id, data, source_url, article_type):
         })
     children.append({"object": "block", "type": "divider", "divider": {}})
 
-    payload = {
-        "properties": props_update,
-        "children": children,
-    }
-
     try:
-        url = f"https://api.notion.com/v1/pages/{page_id}"
-        res = requests.patch(url, headers=headers, json=payload, timeout=10)
-        if res.status_code == 200:
-            logger.info(f"📎 [Notion] 已追加{article_label}到已有文件（关联报道数: {current_count + 1}）")
+        # 1. 更新页面属性
+        url_properties = f"https://api.notion.com/v1/pages/{page_id}"
+        res_prop = requests.patch(url_properties, headers=headers, json={"properties": props_update}, timeout=10)
+
+        # 2. 追加内容到页面正文
+        url_children = f"https://api.notion.com/v1/blocks/{page_id}/children"
+        res_child = requests.patch(url_children, headers=headers, json={"children": children}, timeout=10)
+
+        if res_prop.status_code == 200 and res_child.status_code == 200:
+            logger.info(f"📎 [Notion] 已追加{article_label}到已有文件并更新属性（关联报道数: {current_count + 1}）")
             return True
         else:
-            logger.warning(f"   ⚠️ [Notion] 追加报道失败，状态码: {res.status_code}")
+            logger.warning(
+                f"   ⚠️ [Notion] 追加报道部分失败：更新属性状态码={res_prop.status_code}，追加正文状态码={res_child.status_code}"
+            )
             return False
     except Exception as e:
         logger.error(f"   ❌ [Notion] 追加报道连接异常: {str(e)}")

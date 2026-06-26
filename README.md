@@ -1,6 +1,6 @@
 # Macro Policy Radar — 全球关键矿产宏观政策雷达
 
-> **当前版本：v4.3** — 事实优先重构（智库级基线定锚 + 五重防线防幻觉）
+> **当前版本：v5.5** — 自动寻源系统与政策覆盖修复（泛在域名通配 RSS + 逆向域名回溯闭环自适应寻源）
 
 ## 项目概述
 
@@ -21,6 +21,7 @@
 | **五道防线** | `is_valid_macro_policy` 杀伤开关 → `noise_patterns` 28 关键词过滤 → `Historical_Noise` 旧规拦截 → 时效性校验（年份预扫 + LLM 自检） → `_sanitize_fabricated_numbers` 数字净化兜底 |
 | **智库分析框架** | `factual_basis`（原文溯源）→ `industry_baseline_recall`（CoT 常识锚）→ `impact_deduction`（🔻上游→🔺中游→🔻下游 节点推演）→ `baseline_shift_detected`（范式转移自检） |
 | **双闸门推送** | 四重 AND（烈度 + 官方源 + 非程序性说明 + 置信度≠Low），通过才推送钉钉 |
+| **自适应寻源 (Layer 4)** | **国别域名通配 RSS 扫描 (Scheme 1)** 自动捕捉新政；**成功政策域名回溯探针 (Scheme 2)** 自动抽取未知官网域名并写入 YAML 候选池 |
 | **基线运维** | `knowledge_baselines.yaml` 7 国解耦基线 + 启动交叉表 + `audit_baselines.py` 季度影子审计 |
 | **分析范式** | 对标 Rhodium / CSIS / 情报界 ICD 203：Fact → Baseline → Directional Impact |
 
@@ -32,7 +33,8 @@
 macro-policy-radar/
 ├── main.py                              # 核心引擎（唯一运行入口）
 ├── policy_schema.json                   # JSON Schema 约束（认知滤网 + 输出规范）
-├── sources.yaml                         # 三层寻源配置
+├── sources.yaml                         # 四层寻源配置（含通配扫描源）
+├── discovered_sources.yaml             # 自动发现的新官方源候选池 (v5.5 新增)
 ├── knowledge_baselines.yaml             # 7 国产业基线库（解耦代码，独立维护）
 ├── audit_baselines.py                   # 季度影子审计脚本
 ├── requirements.txt                     # Python 依赖
@@ -94,11 +96,12 @@ python audit_baselines.py --update-timestamp
                                          │ load + inject per country
                                          ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│  输入层                                                             │
-│  ├── 静态 HTML 靶向抓取（esdm.go.id 等 15 源）                       │
-│  ├── 声明式查询矩阵（6 矿种 × 25 关键词 → NewsAPI + RSS）            │
-│  ├── 自适应热点发现（DeepSeek 推荐当周查询）                          │
-│  └── v4.0 二级抓取：RSS headline → fetch_article_full_text → 全文   │
+│  输入层 (四层自适应寻源)                                            │
+│  ├── 第 1 层：静态 HTML 靶向抓取（esdm.go.id 等 20+ 精选源）          │
+│  ├── 第 2 层：声明式查询矩阵（10 矿种 × 30 关键词 → NewsAPI + RSS）    │
+│  ├── 第 3 层：自适应热点发现（DeepSeek 每周推荐当周查询）              │
+│  ├── 第 4 层：自适应自动寻源（域名通配 RSS 泛搜 + 逆向域名回溯探针）    │
+│  └── 二级抓取深度补全：RSS headline → fetch_article_full_text → 全文  │
 └──────────────────────────┬─────────────────────────────────────────┘
                            ▼
 ┌────────────────────────────────────────────────────────────────────┐

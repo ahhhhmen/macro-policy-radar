@@ -111,7 +111,7 @@ def load_all_sources(yaml_path):
         days_back = 7
         if matrix_config:
             days_back = matrix_config.get("days_back", 7)
-            for mq in generate_queries_from_matrix(matrix_config, max_keywords_per_query=25):
+            for mq in generate_queries_from_matrix(matrix_config, max_keywords_per_query=8):
                 sources.append({
                     "id": mq["id"],
                     "country": "GLOBAL",

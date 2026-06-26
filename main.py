@@ -139,6 +139,94 @@ def load_all_sources(yaml_path):
 
         return sources
 
+def _get_configured_domains(yaml_path: str) -> set:
+    """从 sources.yaml 的 macro_sources 中收集已配置的所有原生政府/官方网站域名"""
+    domains = set()
+    try:
+        with open(yaml_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+            for src in config.get("macro_sources", []):
+                url = src.get("url", "")
+                if url and url.startswith("http"):
+                    parsed = urllib.parse.urlparse(url)
+                    domain = parsed.netloc.lower()
+                    # 排除公共聚合和 RSS 域名，我们需要真正的部委官网域名
+                    if domain not in ("news.google.com", "newsapi.org", "plink.anyfeeder.com"):
+                        domains.add(domain)
+    except Exception as e:
+        logger.warning(f"读取 sources.yaml 提取已知域名失败: {e}")
+    return domains
+
+def log_discovered_source(source_url: str, policy_data: dict, configured_domains: set, candidates_yaml_path: str) -> dict | None:
+    """
+    【方案二：自适应寻源】检查成功沉淀的政策链接，若为未知的新官方站点，自动记录到 discovered_sources.yaml
+    """
+    if not source_url or not source_url.startswith("http"):
+        return None
+
+    try:
+        parsed_url = urllib.parse.urlparse(source_url)
+        domain = parsed_url.netloc.lower()
+    except Exception as e:
+        logger.warning(f"解析 source_url [{source_url}] 域名失败: {e}")
+        return None
+
+    # 排除公共聚合域名
+    if domain in ("news.google.com", "newsapi.org", "plink.anyfeeder.com", "anyfeeder.com") or not domain:
+        return None
+
+    # 模糊匹配：判断 domain 是否在已知的 whitelist 域名中
+    is_known = False
+    for k_domain in configured_domains:
+        if domain == k_domain or domain.endswith("." + k_domain) or k_domain.endswith("." + domain):
+            is_known = True
+            break
+
+    if is_known:
+        return None
+
+    # 属于未知的新源！读取并更新 discovered_sources.yaml
+    candidates = {}
+    if os.path.exists(candidates_yaml_path):
+        try:
+            with open(candidates_yaml_path, 'r', encoding='utf-8') as f:
+                candidates = yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.warning(f"读取 discovered_sources.yaml 失败: {e}")
+
+    if "candidates" not in candidates:
+        candidates["candidates"] = []
+
+    # 检查是否已记录过该域名
+    existing_domains = [c.get("domain") for c in candidates["candidates"]]
+    if domain in existing_domains:
+        return None
+
+    # 构建并存入新发现实体
+    pd = policy_data.get("policy_dynamics", {})
+    entity = policy_data.get("policy_entity", {}) or {}
+    md = policy_data.get("metadata", {})
+
+    new_candidate = {
+        "domain": domain,
+        "agency_name_guess": md.get("issuing_authority") or pd.get("issuing_authority") or "未知官方机构",
+        "country": md.get("country", "UNKNOWN"),
+        "mineral_types": md.get("mineral_types", []),
+        "sample_policy_title": pd.get("policy_name_zh") or entity.get("chinese_translation") or "未知政策",
+        "sample_article_url": source_url,
+        "first_discovered_at": datetime.now().isoformat()
+    }
+    candidates["candidates"].append(new_candidate)
+
+    try:
+        with open(candidates_yaml_path, 'w', encoding='utf-8') as f:
+            yaml.dump(candidates, f, allow_unicode=True, sort_keys=False)
+        logger.info(f"✨ [自动寻源] 捕获到全新官方站点并记入 discovered_sources.yaml: {domain} ({new_candidate['agency_name_guess']})")
+        return new_candidate
+    except Exception as e:
+        logger.warning(f"写入 discovered_sources.yaml 失败: {e}")
+    return None
+
 def fetch_and_clean_html(url, selector):
     """【HTML 轨道】抓取原生网页（v3.1: 容忍 SSL 证书过期/自签名）"""
     headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
@@ -616,7 +704,12 @@ _SYSTEM_PROMPT_V40 = (
     "  - 能源安全政策（如天然气保留计划、石油储备、煤炭出口禁令等）\n"
     "  - 农业大宗商品、粮食安全政策\n"
     "若原文仅涉及上述排除品类而未触及 10 种目标矿产，直接判无效。\n"
-    "⚠️ 特别注意：钨、镓、锗、铟是新增的合法目标矿产，这些矿产的出口管制/配额/限制政策必须判定为有效。\n\n"
+    "⚠️ 特别注意：钨、镓、锗、铟是新增的合法目标矿产，这些矿产的出口管制/配额/限制政策必须判定为有效。\n"
+    "⚠️ 框架法豁免：若原文是跨行业/跨矿种的供应链安全框架法、反外国制裁法、出口管制通用法、"
+    "产业链安全调查办法等上位法/母法，即使正文未提及特定矿种，只要其法律效力可覆盖10种目标矿产的"
+    "进出口/投资/交易，必须判定 is_valid_macro_policy=true。"
+    "典型例子：国务院令第834号《产业链供应链安全的规定》、《反外国制裁法》、"
+    "《产业链供应链安全调查工作办法》等。\n\n"
     "【v5.0 实体-事件分离 · 核心架构】\n"
     "- policy_entity：描述『政策文件本身』（稳定的、跨报道不变的标识信息）\n"
     "  · official_name：从原文提取最完整、最官方的法案名称原文（去重主键）。宁可保留原文长全称，不要自己缩写。\n"
@@ -1999,7 +2092,7 @@ def _fmt_provisions(text):
     return "\n".join(bullets)
 
 
-def send_dingtalk_digest(policies):
+def send_dingtalk_digest(policies, discovered_sources=None):
     """将本轮所有通过门控的政策合并为单条钉钉摘要卡片（基于 radar_infra.sink.send_dingtalk）。"""
     webhook_url = os.environ.get("DINGTALK_WEBHOOK")
     if not webhook_url or webhook_url == "disabled":
@@ -2115,7 +2208,23 @@ def send_dingtalk_digest(policies):
 
     combined_body = "\n\n".join(blocks)
     header = f"📡 宏观政策雷达 · 本期 {n} 条预警"
-    full_text = f"{header}\n\n{combined_body}\n\n━━━━━━━━━━━━━━━━━━━━━━\n📋 已同步存入 Notion 情报资产库"
+    
+    # ── 新增：自动寻源报告 ──
+    discovery_section = ""
+    if discovered_sources:
+        lines = [
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            "✨ **【自动寻源发现】本轮捕获到以下新官方网站域名：**",
+        ]
+        for ds in discovered_sources:
+            lines.append(
+                f"- **{ds['agency_name_guess']}** ({ds['domain']}) [{ds['country']}]\n"
+                f"  📄 样本政策：[{ds['sample_policy_title']}]({ds['sample_article_url']})"
+            )
+        lines.append("💡 *已记入 discovered_sources.yaml 待处理池，请确认后添加至 sources.yaml*")
+        discovery_section = "\n" + "\n".join(lines)
+
+    full_text = f"{header}\n\n{combined_body}\n\n━━━━━━━━━━━━━━━━━━━━━━\n📋 已同步存入 Notion 情报资产库{discovery_section}"
 
     send_dingtalk(
         webhook_url=webhook_url,
@@ -2133,6 +2242,8 @@ if __name__ == "__main__":
     PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
     schema = load_schema(os.path.join(PROJECT_DIR, "policy_schema.json"))
     all_active_sources = load_all_sources(os.path.join(PROJECT_DIR, "sources.yaml"))
+    configured_domains = _get_configured_domains(os.path.join(PROJECT_DIR, "sources.yaml"))
+    discovered_sources_this_run = []
 
     # v4.2: 加载活体基线知识库
     baselines, baseline_updated = load_knowledge_baselines(
@@ -2347,6 +2458,16 @@ if __name__ == "__main__":
             is_new_doc = insert_result.get("is_new", False)
             page_id = insert_result.get("page_id")
 
+            # ---- 自动寻源探针 (Scheme 2) ----
+            new_cand = log_discovered_source(
+                source_url,
+                analysis_result,
+                configured_domains,
+                os.path.join(PROJECT_DIR, "discovered_sources.yaml")
+            )
+            if new_cand:
+                discovered_sources_this_run.append(new_cand)
+
             # 已有文件的报道 → 语义 Diff 判定是否有质变
             material_change = None
             if not is_new_doc and page_id:
@@ -2372,7 +2493,10 @@ if __name__ == "__main__":
     # ---- v3.5: 汇总推送 ----
     if pending_alerts:
         logger.info(f"\n📬 本轮共 {len(pending_alerts)} 条政策通过研判，正在汇总为单条摘要推送...")
-        send_dingtalk_digest(pending_alerts)
+        send_dingtalk_digest(pending_alerts, discovered_sources_this_run)
+    elif discovered_sources_this_run:
+        logger.info(f"\n📬 本轮无告警政策，但捕获到 {len(discovered_sources_this_run)} 个新官方站点域名，进行寻源推送...")
+        send_dingtalk_digest([], discovered_sources_this_run)
     else:
         logger.info("\nℹ️ 本轮无政策达到钉钉推送阈值。")
 

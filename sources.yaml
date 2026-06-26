@@ -56,6 +56,12 @@ query_matrix:
     - "Forced Labor Prevention"
     - "Carbon Border Adjustment"
     - "Cross-Border Compliance"
+    # 产业链供应链安全/反制类（新增 — 覆盖中国834号令及配套办法）
+    - "Supply Chain Security"
+    - "Supply Chain Investigation"
+    - "Counter-Sanction"
+    - "Anti-Foreign Sanctions"
+    - "Industrial Chain Security"
     # 绿色壁垒/新兴产业政策（前瞻覆盖）
     - "Critical Minerals Strategy"
     - "Green Subsidy"
@@ -207,12 +213,48 @@ macro_sources:
 
   - id: "cn_mofcom"
     country: "CN"
-    agency: "中华人民共和国商务部"
+    agency: "中华人民共和国商务部（政务公开）"
     feed_type: "html"
-    url: "https://www.mofcom.gov.cn/xwfbh/"
-    dom_selector: "div.article, div.main, div.content, ul.list, div.news-list"
+    url: "https://www.mofcom.gov.cn/article/zwgk/"
+    dom_selector: "div.article, div.f-main, ul.txtList_01"
     enabled: true
-    notes: "商务部新闻发布（对外投资/供应链合规政策发布渠道）"
+    notes: "v5.4 修正：从新闻发布会改为政务公开总入口（含公告/通知/法规）"
+
+  - id: "cn_mee_gwywj"
+    country: "CN"
+    agency: "中华人民共和国生态环境部（国务院有关文件）"
+    feed_type: "html"
+    url: "https://www.mee.gov.cn/zcwj/gwywj/"
+    dom_selector: "div.content_body, ul.listTxt, div.article"
+    enabled: true
+    notes: "v5.4 新增：国务院令/产业链供应链安全等跨部委政策转载渠道"
+
+  - id: "cn_mofcom_hzs"
+    country: "CN"
+    agency: "商务部合作司（对外投资政策）"
+    feed_type: "html"
+    url: "https://hzs.mofcom.gov.cn/zcfb/jwtz/index.html"
+    dom_selector: "div.article, div.content, ul.list"
+    enabled: true
+    notes: "v5.4 新增：供应链安全调查办法/对外投资审批等政策首发渠道"
+
+  - id: "cn_mofcom_cacs"
+    country: "CN"
+    agency: "商务部贸易救济调查局"
+    feed_type: "html"
+    url: "https://cacs.mofcom.gov.cn/list/gnwjmdt/gn/1/noChild.html"
+    dom_selector: "section.article, div.content, ul.list"
+    enabled: true
+    notes: "v5.4 新增：反倾销/反补贴/保障措施/产业链安全调查信息枢纽"
+
+  - id: "cn_mofcom_zcfg"
+    country: "CN"
+    agency: "商务部政策法规（公告）"
+    feed_type: "html"
+    url: "https://www.mofcom.gov.cn/zcfg/"
+    dom_selector: "div.article, div.content, ul.list, div.news-list"
+    enabled: true
+    notes: "v5.4 新增：商务部部令/公告的官方归档渠道"
 
   - id: "cn_ndrc"
     country: "CN"
@@ -290,6 +332,15 @@ macro_sources:
     enabled: true
     notes: "v5.3 新增：中国出口管制/两用物项/商务部公告 — 覆盖稀土/钨/镓/锗等管制清单"
 
+  # ---- v5.4: 中国产业链供应链安全 RSS 补充（834号令及配套办法）----
+  - id: "cn_supply_chain_security_rss"
+    country: "CN"
+    agency: "中国产业链供应链安全-RSS专线"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=%E4%BA%A7%E4%B8%9A%E9%93%BE%E4%BE%9B%E5%BA%94%E9%93%BE%E5%AE%89%E5%85%A8+OR+%E4%BE%9B%E5%BA%94%E9%93%BE%E5%AE%89%E5%85%A8%E8%B0%83%E6%9F%A5+OR+%E5%8F%8D%E5%A4%96%E5%9B%BD%E5%88%B6%E8%A3%81+OR+%E5%8F%8D%E5%88%B6%E6%B8%85%E5%8D%95&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+    enabled: true
+    notes: "v5.4 新增：产业链供应链安全法/调查办法/反制清单等政策"
+
   # ---- v5.3: EU关键原材料法案 RSS 补充 ----
   - id: "eu_crma_rss"
     country: "EU"
@@ -316,3 +367,42 @@ macro_sources:
     url: "https://news.google.com/rss/search?q=min%C3%A9raux+critiques+terres+rares+lithium+cobalt+nickel+cuivre+exportation+quota&hl=fr&gl=CD&ceid=CD:fr"
     enabled: true
     notes: "法语 RSS 专线：覆盖刚果(金)/几内亚/马达加斯加/摩洛哥等非洲矿产政策"
+
+  # ---- 方案一：国别域名通配 RSS 扫描（自动寻源） ----
+  - id: "cn_wildcard_gov_rss"
+    country: "CN"
+    agency: "中国政府通配域名扫描"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:*.gov.cn+(\"关键矿产\"+OR+\"出口管制\"+OR+\"两用物项\"+OR+\"出口限制\"+OR+\"战略储备\"+OR+\"产业链供应链安全\")&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+    enabled: true
+    notes: "自动覆盖中国所有部委及地方政府官网，防漏配"
+
+  - id: "id_wildcard_gov_rss"
+    country: "ID"
+    agency: "印尼政府通配域名扫描"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:*.go.id+(nikel+OR+nickel+OR+ekspor+OR+RKAB+OR+Danantara+OR+DSI)&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+    notes: "自动覆盖ESDM/贸易部/海关等印尼政府站点，防止遗漏新设部委"
+
+  - id: "au_wildcard_gov_rss"
+    country: "AU"
+    agency: "澳大利亚政府通配域名扫描"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:*.gov.au+(\"critical+minerals\"+OR+\"export+restriction\"+OR+\"FIRB\"+OR+\"due+diligence\")&hl=en-US&gl=AU&ceid=AU:en"
+    enabled: true
+
+  - id: "cl_wildcard_gov_rss"
+    country: "CL"
+    agency: "智利政府通配域名扫描"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:*.gob.cl+(litio+OR+cobre+OR+nacionalizacion+OR+exportacion)&hl=es-419&gl=CL&ceid=CL:es-419"
+    enabled: true
+
+  - id: "cd_wildcard_gov_rss"
+    country: "CD"
+    agency: "刚果(金)政府通配域名扫描"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:*.gouv.cd+(cobalt+OR+cuivre+OR+exportation+OR+redevance)&hl=fr&gl=CD&ceid=CD:fr"
+    enabled: true
+

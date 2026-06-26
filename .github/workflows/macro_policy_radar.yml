@@ -39,5 +39,6 @@ jobs:
         DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
         NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
         NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        MAX_AI_CALLS: 35
       run: |
         python3 main.py

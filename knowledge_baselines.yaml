@@ -1,5 +1,5 @@
 version: "3.0"
-last_updated: "2026-06-23"
+last_updated: "2026-06-27"
 description: |
   全球关键矿产政策事实基线库 + 政策文件实体种子。
   每个 documents 条目 = 一个 Notion 容器实体。
@@ -26,7 +26,7 @@ baselines:
         short_name: "RKAB Regulation"
         type: "Regulation"
         effective_date: ""
-        baseline: "RKAB 是印尼采矿与销售的唯一合法配额凭证（现效力3年）。受反腐及环境合规驱动，当前审批严苛，未获批矿山必须停产。定向推演：上游配额受限→中游镍矿供给紧张→内贸原矿溢价上行→独立冶炼厂利润挤压→一体化矿企获成本优势→下游全球中间品底部价格支撑强化。"
+        baseline: "RKAB是采矿与销售配额凭证（效力3年）。2025年批准约3.79亿吨；2026年初始额度收紧至2.6亿-2.7亿吨，中期传闻增至3.6亿吨（低于2025年，属温和调整非基线打破）。未获批矿山停产。推演：配额限制→中游镍矿紧张→内贸溢价上升→支撑全球中间品价格。"
 
   PH:
     country: "菲律宾 (Philippines)"
@@ -133,6 +133,18 @@ baselines:
         type: "Law"
         effective_date: "2022-08-16"
         baseline: "IRA Section 45W 将电池矿产溯源与免税优惠挂钩，FEOC（外国关注实体）限制2024年起排除中国电池组件与矿物。Section 30D 额外提供消费者清洁车辆税收抵免。"
+      - official_name: "Section 232 Tariffs on Copper Imports"
+        chinese_name: "美国对进口铜的232条款关税政策"
+        short_name: "Copper Section 232 Tariffs"
+        type: "Administrative_Order"
+        effective_date: "2025-08"
+        baseline: "自2025年8月起，美国对进口半成品铜（管、线、板等）及相关衍生品征收50%关税，但精炼铜（阴极和阳极）暂予免除。精炼铜关税决定定于2026年6月30日前由商务部报告决定。2026年6月1日行政令将制造地含量降为85%以享受较低税率。"
+      - official_name: "U.S.-DRC Partnership on Critical Minerals (Washington Accord Strategic Support)"
+        chinese_name: "美刚关键矿产伙伴关系与战略投资政策"
+        short_name: "US-DRC Minerals Accord"
+        type: "Policy"
+        effective_date: "2025-12-01"
+        baseline: "2025年12月签署地缘竞争背景下的美刚关键矿产协议，美方投资约7亿美元，支持Virtus Minerals等本土企业于刚果（金）开发Mutoshi与Etoile铜钴矿。另授权国防部（以Department of War名义）战略资本办公室（OSC）开展数亿美元的关键矿产国内加工贷款（如Energy Fuels的7.25亿美元贷款）。"
 
   CD:
     country: "刚果（金） (DRC)"
@@ -143,6 +155,12 @@ baselines:
         type: "Regulation"
         effective_date: "2025"
         baseline: "刚果(金)政府收紧钴出口配额，2025年剩余时间内限定约1.8万吨，2026-2027年年出口上限约9.6万吨，较2024年22万吨实际出口量降幅超50%。"
+      - official_name: "Acquisition of Chemaf Mining Assets by Virtus Minerals in DRC"
+        chinese_name: "Virtus Minerals 收购刚果（金）Chemaf 铜钴矿资产项目"
+        short_name: "Virtus Chemaf Acquisition"
+        type: "Policy"
+        effective_date: "2026-03-27"
+        baseline: "美国矿企Virtus Minerals于2026年3月27日最终完成对Chemaf在刚果（金）的Mutoshi和Etoile铜钴矿的100%股权收购，承担近10亿美元债务，并计划投入超7亿美元开发，直接介入刚果（金）钴铜供应链，对中资企业控制的主导地位构成地缘挑战。"
 
   GLOBAL:
     country: "全球标准与跨国倡议 (Global Standards)"
@@ -174,4 +192,14 @@ baselines:
         type: "Standard"
         effective_date: ""
         baseline: "铜行业 ESG 认证标准。推演逻辑：认证更新 → 合格铜源供给收缩 → 认证溢价。"
+
+  GB:
+    country: "英国 (United Kingdom)"
+    documents:
+      - official_name: "UK Critical Minerals Strategy (Magnet Hub and Accelerator Investment)"
+        chinese_name: "英国关键矿产战略与供应链资金计划"
+        short_name: "UK Critical Minerals Strategy"
+        type: "Policy"
+        effective_date: "2026-06-22"
+        baseline: "英国政府于2026年6月22日公布5000万英镑的关键矿产供应链投资包（包含2000万英镑用于建立国家稀土磁铁制造设施Magnet Hub，2500万英镑用于Critical Minerals Accelerator，500万英镑用于需求汇总平台），用以建立本土供应链，降低对外高度依赖。"
 

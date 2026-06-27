@@ -175,6 +175,27 @@ def log_discovered_source(source_url: str, policy_data: dict, configured_domains
     if domain in ("news.google.com", "newsapi.org", "plink.anyfeeder.com", "anyfeeder.com") or not domain:
         return None
 
+    # v5.3: 排除已知的主流新闻媒体、大宗商品自媒体与博客域名，防止自适应寻源候选池被污染
+    KNOWN_MEDIA_DOMAINS = {
+        "reuters.com", "bloomberg.com", "mining.com", "miningweekly.com", 
+        "scmp.com", "ft.com", "nytimes.com", "wsj.com", "economist.com",
+        "spglobal.com", "woodmac.com", "fitchratings.com", "platts.com",
+        "metalbulletin.com", "lme.com", "argusmedia.com", "insider.com",
+        "legalinsurrection.com", "apnews.com", "afp.com", "reuters.cn",
+        "xinhuanet.com", "people.com.cn", "chinadaily.com.cn", "sinchew.com.my",
+        "yahoo.com", "google.com", "bing.com", "substack.com", "medium.com",
+        "wikipedia.org", "wto.org", "weforum.org", "worldbank.org", "imf.org"
+    }
+    domain_parts = domain.split(".")
+    is_media = False
+    for i in range(len(domain_parts) - 1):
+        parent_domain = ".".join(domain_parts[i:])
+        if parent_domain in KNOWN_MEDIA_DOMAINS:
+            is_media = True
+            break
+    if is_media:
+        return None
+
     # 模糊匹配：判断 domain 是否在已知的 whitelist 域名中
     is_known = False
     for k_domain in configured_domains:
@@ -704,6 +725,7 @@ _SYSTEM_PROMPT_V40 = (
     "  - 能源安全政策（如天然气保留计划、石油储备、煤炭出口禁令等）\n"
     "  - 农业大宗商品、粮食安全政策\n"
     "若原文仅涉及上述排除品类而未触及 10 种目标矿产，直接判无效。\n"
+    "⚠️ 垃圾信源与主观博客拦截铁律：如果新闻来源是时政论坛、自媒体、明显带主观政治立场且缺乏行业公信力的博客（例如 legalinsurrection.com 等博客自媒体文章），必须判定 is_valid_macro_policy=false，直接丢弃。\n"
     "⚠️ 特别注意：钨、镓、锗、铟是新增的合法目标矿产，这些矿产的出口管制/配额/限制政策必须判定为有效。\n"
     "⚠️ 框架法豁免：若原文是跨行业/跨矿种的供应链安全框架法、反外国制裁法、出口管制通用法、"
     "产业链安全调查办法等上位法/母法，即使正文未提及特定矿种，只要其法律效力可覆盖10种目标矿产的"
@@ -755,7 +777,18 @@ _SYSTEM_PROMPT_V31 = _SYSTEM_PROMPT_V40
 def extract_macro_policy(raw_text, schema_dict, baseline_injection=""):
     """调用 DeepSeek 进行高管看板级宏观研判（v5.1: Context Cache 前缀复用 + 基线独立 system 消息）"""
     client = _get_llm_client()
+    
+    # 动态把时间锚点拼入系统提示词，作为物理时间轴参考，防止模型产生时空倒错
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    time_anchor_prompt = (
+        f"你是一个全球关键矿产的顶尖智库分析师。\n"
+        f"【⚠️ 极其重要时间锚点 ⚠️】\n"
+        f"今天是 {current_date}。你在判定法案是“提案”、“正在审议”还是“已生效”时，必须严格以此时间为唯一基准！\n"
+        f"任何公布的生效日期在 {current_date} 之后的事件，目前阶段绝不能写成“已生效”（Fully_Effective），只能是“已批准尚未生效”（Approved_Not_Effective）或“审议中/提案阶段”。未来发生的事件绝对不能写成过去或现在时态！"
+    )
+    
     system_prompt = (
+        f"{time_anchor_prompt}\n\n"
         f"{_SYSTEM_PROMPT_V40}\n\n"
         f"【⚠️ 核心硬约束：严格按以下 Schema 规范返回 JSON】\n"
         f"{json.dumps(schema_dict, ensure_ascii=False, indent=2)}"
@@ -969,6 +1002,40 @@ def _apply_number_sanitizer(data, fetched_text):
         warning = "\n\n⚠️【系统警示】以上含(待核)标记的数字未在原文中出现，系分析师估算或模型生成，请人工核实。"
         si["impact_deduction"] = (si.get("impact_deduction") or "") + warning
         data["_numbers_flagged"] = total
+
+
+def _validate_and_sanitize_future_dates(data):
+    """
+    v5.3: 时效性检验：如果生效日期（effective_date）在未来，强制 current_stage 不能是 Fully_Effective，
+    将其降级为 Approved_Not_Effective，并触发 review 标识，防止将未发生事件误报为已生效。
+    """
+    if not data:
+        return
+
+    pd = data.get("policy_dynamics", {}) or {}
+    entity = data.get("policy_entity", {}) or {}
+    eff_date_str = (pd.get("effective_date") or "").strip()
+    if not eff_date_str or eff_date_str.lower() in ("unknown", "null"):
+        return
+
+    try:
+        # 尝试解析 YYYY-MM-DD 格式
+        eff_date = datetime.strptime(eff_date_str[:10], "%Y-%m-%d")
+        current_date = datetime.now()
+        if eff_date > current_date:
+            stage = entity.get("current_stage") or pd.get("current_stage")
+            if stage in ("Fully_Effective", "已生效"):
+                new_stage = "Approved_Not_Effective"
+                entity["current_stage"] = new_stage
+                pd["current_stage"] = new_stage
+                logger.warning(
+                    f"时效性修正: 政策生效日期 {eff_date_str} 晚于当前运行时间 {current_date.strftime('%Y-%m-%d')}，"
+                    f"将阶段从 {stage} 强制修正为 {new_stage}，并标记待核。"
+                )
+                data["_review_flag"] = True
+    except ValueError:
+        # 日期格式无法规范解析，略过
+        pass
 
 
 # =============================================================================
@@ -2437,6 +2504,9 @@ if __name__ == "__main__":
 
             # ---- v4.0: 数字净化兜底（LLM 返回后、入库前） ----
             _apply_number_sanitizer(analysis_result, fetched_text)
+
+            # v5.3: 时效性未来生效日校验与阶段降级修正
+            _validate_and_sanitize_future_dates(analysis_result)
 
             # ---- v4.2: 范式转移检测（基线失效雷达） ----
             si_check = analysis_result.get("strategic_implications", {}) or {}

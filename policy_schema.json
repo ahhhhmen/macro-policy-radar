@@ -103,8 +103,14 @@
       "properties": {
         "supply_chain_impact_level": { "type": "string", "enum": ["High_Disruption","Moderate_Adjustment","Low_Monitoring"] },
         "analytic_confidence": { "type": "string", "enum": ["High","Medium","Low"] },
-        "industry_baseline_recall": { "type": "string", "description": "【防冗余锚点 · v5.3】仅复述该国该矿种的历史旧基线（如：印尼自2020年禁止未加工镍矿出口）。【绝对禁止】在此字段中提及本次新闻的主角法案（如 PP 24/2026、DSI、Danantara）！绝不出现'进一步将...'之类的新旧对比句式。新规定只准留在 substantive_provisions 和 event_summary 里。若旧基线被打破，仅可句末追加：'旧基线已被打破'。字数限80字。" },
-        "baseline_shift_detected": { "type": "boolean" },
+        "industry_baseline_recall": {
+          "type": "string",
+          "description": "【严禁脑补 · 只能背诵】你必须且只能从输入消息中【当前历史基线】（即注入的基线文本）中完全摘抄或直接提炼该国该矿种的核心法则。绝对不允许自行添加、编造基线库中没有的数据（如去年的配额数字、产能数字等）！若无对应基线，可简单说明或留空。字数限80字。"
+        },
+        "baseline_shift_detected": {
+          "type": "boolean",
+          "description": "【防过度告警铁律】：极其谨慎地使用此字段！只有当新闻【明确、彻底地颠覆了你所知的底层常识】（例如：印尼突然宣布'恢复原矿出口'，或美国宣布'废除所有关税'）时才能填 true。对于常规的配额增减、关税调整、新增补贴、项目落地，【绝对禁止】填 true！若不确定，一律填 false。"
+        },
         "impact_deduction": { "type": "string", "description": "自动设为 event_impact_deduction" }
       },
       "required": ["supply_chain_impact_level","analytic_confidence","industry_baseline_recall","baseline_shift_detected","impact_deduction"]

@@ -1043,10 +1043,51 @@ def _validate_and_sanitize_future_dates(data):
 #  在入库前查询同政策名是否已存在，避免重复创建
 # =============================================================================
 
+def _calculate_title_similarity(s1, s2):
+    """
+    v5.3: 语义相似度校验：计算两个政策标题的重合度，并应用年份/缩写防误判规则。
+    使用 lookaround 断言代替 \b，以兼容中文和英文混合文本的提取。
+    """
+    if not s1 or not s2:
+        return False
+
+    # 1. 强力防误判：年份不一致直接判定不相同
+    years1 = set(re.findall(r'(?<!\d)(20[2-3]\d)(?!\d)', s1))
+    years2 = set(re.findall(r'(?<!\d)(20[2-3]\d)(?!\d)', s2))
+    if years1 and years2 and years1 != years2:
+        return False
+
+    # 2. 强力防误判：特有英文缩写（如 CSDDD, CSRD）不一致直接判定不相同
+    acronyms1 = set(re.findall(r'(?<![a-zA-Z])([A-Z]{3,5})(?![a-zA-Z])', s1))
+    acronyms2 = set(re.findall(r'(?<![a-zA-Z])([A-Z]{3,5})(?![a-zA-Z])', s2))
+    # 排除常见的国家/单位缩写，如 DRC, EU, US
+    exclude_acr = {"DRC", "EU", "USA", "UK", "G7", "REE", "NPI", "DSI", "RKAB", "BUMN", "ESDM"}
+    acronyms1 = acronyms1 - exclude_acr
+    acronyms2 = acronyms2 - exclude_acr
+    if acronyms1 and acronyms2 and acronyms1 != acronyms2:
+        return False
+
+    # 3. 计算字符重合度与 Jaccard 相似度
+    s1_clean = s1.lower().replace(" ", "").replace("(", "").replace(")", "").replace("（", "").replace("）", "")
+    s2_clean = s2.lower().replace(" ", "").replace("(", "").replace(")", "").replace("（", "").replace("）", "")
+    
+    set1 = set(s1_clean)
+    set2 = set(s2_clean)
+    common = set1.intersection(set2)
+    
+    # 字符重合占比（基于较短词字集，用于判断包含或重合关系）
+    overlap_ratio = len(common) / min(len(set1), len(set2)) if min(len(set1), len(set2)) > 0 else 0.0
+    # Jaccard 相似度
+    jaccard_ratio = len(common) / len(set1.union(set2)) if len(set1.union(set2)) > 0 else 0.0
+    
+    # 阈值判定：重合度足够高且 Jaccard 表现合理
+    return overlap_ratio >= 0.85 or jaccard_ratio >= 0.65
+
+
 def _notion_search_pages(official_name, fallback_name=""):
     """
-    v5.0: official_name 精确匹配（Title 列）作为去重主键。
-    若 official_name 为空则 fallback 到文档签名或中文名模糊匹配。
+    v5.3: official_name 与 fallback_name 的 Notion 去重查找。
+    引入前缀匹配及 Python 级相似度校验（年份/缩写双校验），防重复且防误杀。
     返回 (exists: bool, existing_page_id: str | None)
     """
     notion_token = os.environ.get("NOTION_TOKEN")
@@ -1061,37 +1102,53 @@ def _notion_search_pages(official_name, fallback_name=""):
         "Notion-Version": "2022-06-28"
     }
 
-    payload = {"filter": {"or": []}, "page_size": 5}
+    payload = {"filter": {"or": []}, "page_size": 20} # 扩大返回以进行二次比对
 
-    # v5.0: 主路径 — 官方原名精确匹配 Title
-    if official_name:
-        payload["filter"]["or"].append({
-            "property": "政策名称",
-            "title": {"equals": official_name}
-        })
-        # 兜底：原名太长可能被截断，加 contains
-        if len(official_name) > 50:
-            payload["filter"]["or"].append({
-                "property": "政策名称",
-                "title": {"contains": official_name[:100]}
-            })
-
-    # 兜底 — 中文名/文件签名模糊匹配
-    if fallback_name:
-        payload["filter"]["or"].append({
-            "property": "政策名称",
-            "title": {"contains": fallback_name[:80]}
-        })
-
-    if not payload["filter"]["or"]:
+    target_name = (official_name or fallback_name or "").strip()
+    if not target_name:
         return False, None
+
+    # 1. 基础精确匹配
+    payload["filter"]["or"].append({
+        "property": "政策名称",
+        "title": {"equals": target_name}
+    })
+
+    # 2. 核心前缀提取进行范围性 contains 查询
+    prefix = ""
+    normalized = target_name.replace("政策", "").replace("条例", "").replace("法案", "").replace("体系", "").replace("（现行政策）", "").strip()
+    if any('\u4e00' <= char <= '\u9fff' for char in normalized):
+        prefix = normalized[:5] # 中文取前 5 字
+    else:
+        prefix = " ".join(normalized.split()[:3]) # 英文取前 3 词
+
+    if prefix and len(prefix) >= 3:
+        payload["filter"]["or"].append({
+            "property": "政策名称",
+            "title": {"contains": prefix}
+        })
 
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=10)
         if res.status_code == 200:
             results = res.json().get("results", [])
-            if results:
-                return True, results[0]["id"]
+            for page in results:
+                # 获取候选页面标题
+                page_props = page.get("properties", {})
+                title_prop = page_props.get("政策名称", {})
+                candidate_title = ""
+                if title_prop and title_prop.get("title"):
+                    candidate_title = title_prop["title"][0].get("plain_text", "").strip()
+                
+                # 精确匹配直通车
+                if candidate_title == target_name:
+                    return True, page["id"]
+                
+                # 模糊相似度加校验匹配
+                if _calculate_title_similarity(target_name, candidate_title):
+                    logger.info(f"🔍 [模糊去重] 发现高度相似条目：『{candidate_title}』与新政策『{target_name}』匹配成功，执行合并更新。")
+                    return True, page["id"]
+                    
         return False, None
     except Exception as e:
         logger.warning(f"   ⚠️ Notion 去重查询异常: {e}")

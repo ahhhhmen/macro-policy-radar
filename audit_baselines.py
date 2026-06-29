@@ -258,6 +258,15 @@ def _print_ci_warning(message):
     print(f"\n::warning::{message}")
 
 
+def _get_rules_for_entry(entry):
+    """从基线条目中提取规则列表，同时兼容 v2.0 (rules) 和 v3.0 (documents)"""
+    if not entry:
+        return []
+    if entry.get("documents"):
+        return [d["baseline"] for d in entry["documents"] if d.get("baseline")]
+    return entry.get("rules") or []
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Baseline Auditor")
@@ -292,8 +301,9 @@ if __name__ == "__main__":
             print(f"❌ 国家代码 {code} 不在基线库中。")
             sys.exit(1)
         entry = baselines[code]
+        rules = _get_rules_for_entry(entry)
         client = _get_llm_client()
-        result = _audit_single_country(code, entry["country"], entry["rules"], client)
+        result = _audit_single_country(code, entry["country"], rules, client)
         if result["changed"]:
             _print_ci_warning(f"基线异动: {result['report']}")
             print(json.dumps(result["detail"], ensure_ascii=False, indent=2))
@@ -305,10 +315,11 @@ if __name__ == "__main__":
     changes_found = []
 
     for code, entry in baselines.items():
-        if not entry.get("rules"):
+        rules = _get_rules_for_entry(entry)
+        if not rules:
             print(f"\nℹ️ {code} ({entry.get('country', '')}) 无规则定义，跳过。")
             continue
-        result = _audit_single_country(code, entry["country"], entry["rules"], client)
+        result = _audit_single_country(code, entry["country"], rules, client)
         if result["changed"]:
             all_ok = False
             changes_found.append(result)

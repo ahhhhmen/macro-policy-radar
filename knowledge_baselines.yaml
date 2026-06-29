@@ -1,5 +1,5 @@
 version: "3.0"
-last_updated: "2026-06-27"
+last_updated: "2026-06-29"
 description: |
   全球关键矿产政策事实基线库 + 政策文件实体种子。
   每个 documents 条目 = 一个 Notion 容器实体。
@@ -26,7 +26,7 @@ baselines:
         short_name: "RKAB Regulation"
         type: "Regulation"
         effective_date: ""
-        baseline: "RKAB是采矿与销售配额凭证（效力3年）。2025年批准约3.79亿吨；2026年初始额度收紧至2.6亿-2.7亿吨，中期传闻增至3.6亿吨（低于2025年，属温和调整非基线打破）。未获批矿山停产。推演：配额限制→中游镍矿紧张→内贸溢价上升→支撑全球中间品价格。"
+        baseline: "RKAB是采矿与销售配额凭证（效力3年）。2025年批准约3.79亿吨；2026年初始额度收紧至2.6亿-2.7亿吨，后计划增至3.6亿吨（但截至2026年中尚未最终确定）。未获批矿山停产。推演：配额增加/预期落地→缓解中游镍矿紧张→平抑全球中间品价格上涨预期。"
 
   PH:
     country: "菲律宾 (Philippines)"
@@ -137,14 +137,14 @@ baselines:
         chinese_name: "美国对进口铜的232条款关税政策"
         short_name: "Copper Section 232 Tariffs"
         type: "Administrative_Order"
-        effective_date: "2025-08"
-        baseline: "自2025年8月起，美国对进口半成品铜（管、线、板等）及相关衍生品征收50%关税，但精炼铜（阴极和阳极）暂予免除。精炼铜关税决定定于2026年6月30日前由商务部报告决定。2026年6月1日行政令将制造地含量降为85%以享受较低税率。"
+        effective_date: "2026-06-30"
+        baseline: "自2025年8月起对进口半成品铜（管、线、板等）征收50%关税。2026年6月30日美国最终确定对进口铜征收232条款关税，且特朗普总统修改了对铝、铜和钢铁的232条款关税。"
       - official_name: "U.S.-DRC Partnership on Critical Minerals (Washington Accord Strategic Support)"
         chinese_name: "美刚关键矿产伙伴关系与战略投资政策"
         short_name: "US-DRC Minerals Accord"
         type: "Policy"
         effective_date: "2025-12-01"
-        baseline: "2025年12月签署地缘竞争背景下的美刚关键矿产协议，美方投资约7亿美元，支持Virtus Minerals等本土企业于刚果（金）开发Mutoshi与Etoile铜钴矿。另授权国防部（以Department of War名义）战略资本办公室（OSC）开展数亿美元的关键矿产国内加工贷款（如Energy Fuels的7.25亿美元贷款）。"
+        baseline: "2025年12月签署《华盛顿协议》，2026年美国政府通过金融工具全面落地实施：向本土企业Virtus Minerals提供约7亿美元支持在刚果（金）开发Mutoshi与Etoile两座铜钴矿（目标年产7.5万吨铜阴极和2.5万吨氢氧化钴）；战争部战略资本办公室与Energy Fuels签署7.25亿美元有条件贷款，以扩大美国国内稀土加工能力。"
 
   CD:
     country: "刚果（金） (DRC)"

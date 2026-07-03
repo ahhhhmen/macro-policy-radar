@@ -934,6 +934,10 @@ def _should_push(data, fetched_text="", source_depth="shallow", is_new_document=
     impact = si.get("supply_chain_impact_level", "")
     stage = pd.get("current_stage", "")
     confidence = si.get("analytic_confidence", "Low")
+    event = data.get("event_update", {}) or {}
+    ec = event.get("event_classification", "")
+    material_change = data.get("_material_change")
+    notion_gate = data.get("notion_integration", {}).get("dingtalk_alert_required")
 
     # 硬性不推（始终保留的底线）
     if stage == "Procedural_Statement":
@@ -942,28 +946,31 @@ def _should_push(data, fetched_text="", source_depth="shallow", is_new_document=
         return False, "阶段未核实，仅入库"
     if confidence == "Low":
         return False, f"置信度 Low，仅入库待复核"
+    if data.get("_numbers_flagged", 0) > 0:
+        return False, "数字净化命中，需人工核实后再推送"
+    if notion_gate is False:
+        return False, "LLM 推送闸门判定为不推送"
+    if ec == "Routine_Commentary":
+        return False, f"常规动态（{event.get('event_summary', '')[:40]}），绝对静默"
+    if isinstance(material_change, dict) and not material_change.get("has_material_change"):
+        return False, "语义Diff无实质新信息，静默入库"
 
     # 新文件出台 → 推送（最高优先级）
     if article_type == "Official_Announcement" and is_new_document:
         return True, f"新文件出台：{pd.get('policy_name_zh', '')[:40]}"
 
-    # 既有文件，高冲击或高置信分析 → 推送
-    if impact in ("High_Disruption", "Moderate_Adjustment"):
-        return True, f"重大更新（烈度={impact}, 置信度={confidence}）"
-
     # v5.1 第一层：event_classification 三分类（零额外 API 调用）
-    event = data.get("event_update", {}) or {}
-    ec = event.get("event_classification", "")
     if ec in ("New_Policy_Issuance", "Milestone_Amendment"):
         label = "新政策出台" if ec == "New_Policy_Issuance" else "既有文件里程碑变更"
         return True, f"{label}：{event.get('event_summary', '')[:60]}"
-    if ec == "Routine_Commentary":
-        return False, f"常规动态（{event.get('event_summary', '')[:40]}），绝对静默"
 
     # 语义 Diff 检测到质变 → 推送（兜底纠错）
-    material_change = data.get("_material_change", {}) or {}
-    if material_change.get("has_material_change"):
+    if isinstance(material_change, dict) and material_change.get("has_material_change"):
         return True, f"语义Diff检测到质变：{material_change.get('change_summary', '')[:60]}"
+
+    # 既有文件，高冲击或高置信分析 → 推送
+    if impact in ("High_Disruption", "Moderate_Adjustment"):
+        return True, f"重大更新（烈度={impact}, 置信度={confidence}）"
 
     # 高置信度分析/专家意见 → 推送
     if article_type in ("Analysis_Commentary", "Expert_Opinion") and confidence == "High":
@@ -999,7 +1006,7 @@ def _apply_number_sanitizer(data, fetched_text):
             f"数字净化: 检出 {total} 处疑似捏造数字 "
             f"(条款 {provisions_flagged} / 研判 {deduction_flagged})，已标记待核。"
         )
-        warning = "\n\n⚠️【系统警示】以上含(待核)标记的数字未在原文中出现，系分析师估算或模型生成，请人工核实。"
+        warning = "\n\n【系统警示】以上含(待核)标记的数字未在原文中出现，系分析师估算或模型生成，请人工核实。"
         si["impact_deduction"] = (si.get("impact_deduction") or "") + warning
         data["_numbers_flagged"] = total
 
@@ -1152,6 +1159,41 @@ def _notion_search_pages(official_name, fallback_name=""):
         return False, None
     except Exception as e:
         logger.warning(f"   ⚠️ Notion 去重查询异常: {e}")
+        return False, None
+
+
+def _notion_search_by_rich_text(property_name: str, value: str):
+    """按 Notion rich_text 属性精确查重，主要用于 document_signature 兜底。"""
+    notion_token = os.environ.get("NOTION_TOKEN")
+    database_id = os.environ.get("NOTION_DATABASE_ID")
+    target_value = (value or "").strip()
+    if not notion_token or not database_id or notion_token == "disabled" or not target_value:
+        return False, None
+
+    url = f"https://api.notion.com/v1/databases/{database_id}/query"
+    headers = {
+        "Authorization": f"Bearer {notion_token}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    payload = {
+        "filter": {
+            "property": property_name,
+            "rich_text": {"equals": target_value}
+        },
+        "page_size": 1,
+    }
+
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        if res.status_code == 200:
+            results = res.json().get("results", [])
+            if results:
+                logger.info(f"🔍 [文件签名去重] 通过 {property_name} 命中已有政策文件。")
+                return True, results[0]["id"]
+        return False, None
+    except Exception as e:
+        logger.warning(f"   ⚠️ Notion {property_name} 查重异常: {e}")
         return False, None
 
 
@@ -1968,6 +2010,17 @@ def insert_to_notion(data, source_url):
         else:
             _notion_update_policy(existing_page_id, data, source_url)
         return {"is_new": False, "page_id": existing_page_id}  # 已有文件，供语义 Diff 使用
+
+    # ---- v5.4: 文件签名兜底去重 ----
+    # 新闻报道经常使用标题变体，但 document_signature 应稳定指向同一政策文件。
+    if references_existing and document_signature:
+        exists, existing_page_id = _notion_search_by_rich_text("文件签名", document_signature)
+        if exists and existing_page_id:
+            if article_type in ("News_Report", "Analysis_Commentary", "Expert_Opinion"):
+                _notion_append_news(existing_page_id, data, source_url, article_type)
+            else:
+                _notion_update_policy(existing_page_id, data, source_url)
+            return {"is_new": False, "page_id": existing_page_id}
 
     # ---- v5.0: Notion 标题使用官方原名（wiki 风格），增强标题作为展示名存入原名及出处 ----
     wiki_title = official_name if official_name else (

@@ -36,8 +36,8 @@ This document defines the core domain rules and logic constraints for this speci
 - `.env` 必须忽略并且不得提交。
 - `discovered_sources.yaml` 只记录候选新源，不写入凭证或私密原始数据。
 - 任何临时调试输出、下载的新闻原文、人工标注草稿都不得加入版本控制。
-- 若新增测试依赖外部服务，必须提供本地可运行的 stub 或 mock，不得强迫 CI 以真实密钥回放.
+- 若新增测试依赖外部服务，必须提供本地可运行的 stub 或 mock，不得强迫 CI 以真实密钥回放。
 
 ---
 
-<!-- This file is the single source of truth. .cursorrules, .windsurfrules, .github/copilot-instructions.md, and CLAUDE.md all symlink here. -->
+<!-- This file is the single source of truth. .cursorrules, .windsurfrules, .github/copilot-instructions.md, and AGENTS.md all symlink here. -->

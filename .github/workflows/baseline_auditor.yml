@@ -28,6 +28,7 @@ jobs:
 
       - name: Run Baseline Auditor
         env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           OPENAI_BASE_URL: "https://api.deepseek.com"
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}

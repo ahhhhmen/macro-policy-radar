@@ -4,3 +4,4 @@ requests>=2.31.0
 lxml>=4.9.0
 python-dotenv>=1.0.0
 radar-infra @ git+https://github.com/ahhhhmen/radar-infra.git
+googlenewsdecoder>=0.1.7

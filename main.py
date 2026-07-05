@@ -355,18 +355,16 @@ def _is_within_age(pub_date_str, max_days=RSS_MAX_AGE_DAYS):
 
 def resolve_google_news_url(google_url):
     """
-    解码 Google News 跳转链（news.google.com/rss/articles/...），跟随重定向拿到真实源 URL。
+    解码 Google News 跳转链（news.google.com/rss/articles/...），使用 googlenewsdecoder 拿到真实源 URL。
     非 Google News 链接或解码失败时原样返回，保证不 worse than before。
     """
     if not google_url or "news.google.com" not in google_url:
         return google_url
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-        res = requests.get(google_url, headers=headers, timeout=10,
-                           allow_redirects=True, verify=False)
-        final_url = res.url
-        if final_url and "news.google.com" not in final_url and final_url.startswith("http"):
-            return final_url
+        from googlenewsdecoder import gnewsdecoder
+        res = gnewsdecoder(google_url)
+        if res.get("status") and res.get("decoded_url"):
+            return res["decoded_url"]
         return google_url
     except Exception as e:
         logger.warning(f"⚠️ Google News 链接解码失败 [{google_url[:60]}...]: {str(e)[:80]}")
@@ -2618,7 +2616,11 @@ def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None
         lines.append("💡 *已记入 discovered_sources.yaml 待处理池，请确认后添加至 sources.yaml*")
         discovery_section = "\n".join(lines)
 
-    full_text = f"{header}\n{combined_body}\n\n━━━━━━━━━━━━━━━━━━━━━━\n📋 监测数据已同步入 Notion 资产库{discovery_section}"
+    db_id = os.environ.get("NOTION_DATABASE_ID", "")
+    db_id_clean = db_id.replace("-", "")
+    notion_link_str = f"[Notion 资产库](https://www.notion.so/{db_id_clean})" if db_id_clean else "Notion 资产库"
+
+    full_text = f"{header}\n{combined_body}\n\n━━━━━━━━━━━━━━━━━━━━━━\n📋 监测数据已同步入 {notion_link_str}{discovery_section}"
 
     send_dingtalk(
         webhook_url=webhook_url,

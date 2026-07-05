@@ -1050,10 +1050,53 @@ def _validate_and_sanitize_future_dates(data):
 #  在入库前查询同政策名是否已存在，避免重复创建
 # =============================================================================
 
+def _clean_chinese_title_noise(s: str) -> str:
+    """v5.5: 清理中文标题中的常见政策名词噪音，返回核心名词。"""
+    if not s:
+        return ""
+    s = re.sub(r'^(关于印发|关于公布|关于关于|关于|印发|关于实施|实施|推进)+', '', s)
+    s = re.sub(r'(相关法规|实施细则|暂行规定|管理办法|暂行办法|指导意见|管理条例|实施条例|规定|条例|法案|政策|标准|规范|办法|通知|公告|的通知|的公告)+$', '', s)
+    return s.strip()
+
+
+def _clean_title_noise(title: str) -> str:
+    """
+    v5.5: 清除政策/法案名中的冗余官方指令前缀（如 Regulation (EU) 2024/... 或 Peraturan Menteri ...）。
+    返回核心法案名称。
+    """
+    if not title:
+        return ""
+    cleaned = title.strip()
+    # 欧盟法规前缀去除
+    cleaned = re.sub(
+        r'^(?:Regulation|Directive|Decision)\s*\(EU\)\s*(?:No\s*)?\d+/\d+(?:\s+of\s+the\s+European\s+Parliament\s+and\s+of\s+the\s+Council)?(?:\s+establishing\s+a\s+framework\s+for|\s+on)?',
+        '',
+        cleaned,
+        flags=re.IGNORECASE
+    )
+    # 印尼法规前缀去除
+    cleaned = re.sub(
+        r'^(?:Peraturan\s+Menteri|Peraturan\s+Pemerintah|Keputusan\s+Menteri|Undang-Undang)\s+.*?Nomor\s+\d+\s+Tahun\s+\d+(?:\s+tentang)?',
+        '',
+        cleaned,
+        flags=re.IGNORECASE
+    )
+    # 其它常见行政前缀去除
+    cleaned = re.sub(
+        r'^(?:Decree|Order|Act)\s*(?:No\.?)?\s*\d+(?:\s+of\s+\d{4})?',
+        '',
+        cleaned,
+        flags=re.IGNORECASE
+    )
+    cleaned = cleaned.strip()
+    return cleaned if cleaned else title.strip()
+
+
 def _calculate_title_similarity(s1, s2):
     """
-    v5.3: 语义相似度校验：计算两个政策标题的重合度，并应用年份/缩写防误判规则。
-    使用 lookaround 断言代替 \b，以兼容中文和英文混合文本的提取。
+    v5.5: 语义相似度校验：计算两个政策标题的重合度，并应用年份/缩写防误判规则。
+    对中文进行噪声过滤后计算字符重合度，对英文使用单词 Token 级 Jaccard。
+    支持括号内简称/全称递归比对。
     """
     if not s1 or not s2:
         return False
@@ -1067,35 +1110,62 @@ def _calculate_title_similarity(s1, s2):
     # 2. 强力防误判：特有英文缩写（如 CSDDD, CSRD）不一致直接判定不相同
     acronyms1 = set(re.findall(r'(?<![a-zA-Z])([A-Z]{3,5})(?![a-zA-Z])', s1))
     acronyms2 = set(re.findall(r'(?<![a-zA-Z])([A-Z]{3,5})(?![a-zA-Z])', s2))
-    # 排除常见的国家/单位缩写，如 DRC, EU, US
     exclude_acr = {"DRC", "EU", "USA", "UK", "G7", "REE", "NPI", "DSI", "RKAB", "BUMN", "ESDM"}
     acronyms1 = acronyms1 - exclude_acr
     acronyms2 = acronyms2 - exclude_acr
     if acronyms1 and acronyms2 and acronyms1 != acronyms2:
         return False
 
-    # 3. 计算字符重合度与 Jaccard 相似度
-    s1_clean = s1.lower().replace(" ", "").replace("(", "").replace(")", "").replace("（", "").replace("）", "")
-    s2_clean = s2.lower().replace(" ", "").replace("(", "").replace(")", "").replace("（", "").replace("）", "")
-    
-    set1 = set(s1_clean)
-    set2 = set(s2_clean)
-    common = set1.intersection(set2)
-    
-    # 字符重合占比（基于较短词字集，用于判断包含或重合关系）
-    overlap_ratio = len(common) / min(len(set1), len(set2)) if min(len(set1), len(set2)) > 0 else 0.0
-    # Jaccard 相似度
-    jaccard_ratio = len(common) / len(set1.union(set2)) if len(set1.union(set2)) > 0 else 0.0
-    
-    # 阈值判定：重合度足够高且 Jaccard 表现合理
-    return overlap_ratio >= 0.85 or jaccard_ratio >= 0.65
+    # 3. 递归比对括号内容
+    p1 = re.findall(r'[（\(]([^）\)]+)[）\)]', s1)
+    p2 = re.findall(r'[（\(]([^）\)]+)[）\)]', s2)
+    for part in p1:
+        part_clean = part.strip()
+        if len(part_clean) >= 3 and part_clean.upper() not in {"EU", "USA", "UK", "G7"}:
+            if _calculate_title_similarity(part_clean, re.sub(r'[（\(].*?[）\)]', '', s2).strip()):
+                return True
+    for part in p2:
+        part_clean = part.strip()
+        if len(part_clean) >= 3 and part_clean.upper() not in {"EU", "USA", "UK", "G7"}:
+            if _calculate_title_similarity(re.sub(r'[（\(].*?[）\)]', '', s1).strip(), part_clean):
+                return True
+
+    # 4. 判断是否包含中文
+    has_zh1 = any('\u4e00' <= char <= '\u9fff' for char in s1)
+    has_zh2 = any('\u4e00' <= char <= '\u9fff' for char in s2)
+
+    if has_zh1 or has_zh2:
+        s1_clean = _clean_chinese_title_noise(s1.lower().replace(" ", ""))
+        s2_clean = _clean_chinese_title_noise(s2.lower().replace(" ", ""))
+        if not s1_clean or not s2_clean:
+            return False
+        set1 = set(s1_clean)
+        set2 = set(s2_clean)
+        common = set1.intersection(set2)
+        overlap_ratio = len(common) / min(len(set1), len(set2)) if min(len(set1), len(set2)) > 0 else 0.0
+        jaccard_ratio = len(common) / len(set1.union(set2)) if len(set1.union(set2)) > 0 else 0.0
+        return overlap_ratio >= 0.85 or jaccard_ratio >= 0.65
+    else:
+        def get_tokens(s):
+            s_clean = re.sub(r'[^\w\s]', ' ', s.lower())
+            words = [w for w in s_clean.split() if w]
+            stop_words = {"of", "on", "the", "for", "a", "an", "to", "in", "and", "or", "by", "with", "about"}
+            return set(w for w in words if w not in stop_words and len(w) > 1)
+
+        set1 = get_tokens(s1)
+        set2 = get_tokens(s2)
+        if not set1 or not set2:
+            return False
+        common = set1.intersection(set2)
+        overlap_ratio = len(common) / min(len(set1), len(set2))
+        jaccard_ratio = len(common) / len(set1.union(set2))
+        return overlap_ratio >= 0.85 or jaccard_ratio >= 0.60
 
 
 def _notion_search_pages(official_name, fallback_name=""):
     """
-    v5.3: official_name 与 fallback_name 的 Notion 去重查找。
-    引入前缀匹配及 Python 级相似度校验（年份/缩写双校验），防重复且防误杀。
-    返回 (exists: bool, existing_page_id: str | None)
+    v5.5: official_name 与 fallback_name 的 Notion 去重查找。
+    结合清洗核心前缀、英文缩写、括号简称、及国家-矿种AND逻辑构造多重检索，并用 Python 级相似度校验双重防重。
     """
     notion_token = os.environ.get("NOTION_TOKEN")
     database_id = os.environ.get("NOTION_DATABASE_ID")
@@ -1109,8 +1179,7 @@ def _notion_search_pages(official_name, fallback_name=""):
         "Notion-Version": "2022-06-28"
     }
 
-    payload = {"filter": {"or": []}, "page_size": 20} # 扩大返回以进行二次比对
-
+    payload = {"filter": {"or": []}, "page_size": 25}
     target_name = (official_name or fallback_name or "").strip()
     if not target_name:
         return False, None
@@ -1121,41 +1190,87 @@ def _notion_search_pages(official_name, fallback_name=""):
         "title": {"equals": target_name}
     })
 
-    # 2. 核心前缀提取进行范围性 contains 查询
-    prefix = ""
-    normalized = target_name.replace("政策", "").replace("条例", "").replace("法案", "").replace("体系", "").replace("（现行政策）", "").strip()
-    if any('\u4e00' <= char <= '\u9fff' for char in normalized):
-        prefix = normalized[:5] # 中文取前 5 字
-    else:
-        prefix = " ".join(normalized.split()[:3]) # 英文取前 3 词
+    # 2. 构造前缀与简称/缩写匹配
+    prefixes = []
+    
+    # 提取缩写
+    acronyms = re.findall(r'(?<![a-zA-Z])([A-Z]{3,5})(?![a-zA-Z])', target_name)
+    exclude_acr = {"DRC", "EU", "USA", "UK", "G7", "REE", "NPI", "DSI", "RKAB", "BUMN", "ESDM"}
+    for acr in acronyms:
+        if acr not in exclude_acr:
+            prefixes.append(acr)
+            
+    # 提取括号简称
+    exclude_short = {"EU", "US", "USA", "UK", "G7", "UN", "CN", "ID", "RU", "UA"}
+    parentheses_matches = re.findall(r'[（\(]([^）\)]+)[）\)]', target_name)
+    for part in parentheses_matches:
+        part = part.strip()
+        if len(part) >= 3 and part.upper() not in exclude_short:
+            prefixes.append(part)
 
-    if prefix and len(prefix) >= 3:
+    # 核心前缀提取
+    cleaned = _clean_title_noise(target_name)
+    cleaned_no_paren = re.sub(r'[（\(].*?[）\)]', '', cleaned).strip()
+    normalized = cleaned_no_paren.replace("政策", "").replace("条例", "").replace("法案", "").replace("体系", "").replace("（现行政策）", "").strip()
+    
+    if any('\u4e00' <= char <= '\u9fff' for char in normalized):
+        cn_core = _clean_chinese_title_noise(normalized)
+        if len(cn_core) >= 3:
+            prefixes.append(cn_core[:5])
+        elif len(normalized) >= 3:
+            prefixes.append(normalized[:5])
+    else:
+        words = normalized.split()
+        if len(words) >= 3:
+            prefixes.append(" ".join(words[:3]))
+        elif len(normalized) >= 3:
+            prefixes.append(normalized)
+
+    for p in set(prefixes):
         payload["filter"]["or"].append({
             "property": "政策名称",
-            "title": {"contains": prefix}
+            "title": {"contains": p}
         })
+
+    # 3. 针对国家-矿种组合，使用 AND 查询防止由于官方名前缀多变引起的漏检 (例如 "Indonesia" + "Nickel")
+    if not any('\u4e00' <= char <= '\u9fff' for char in target_name):
+        countries_en = {"indonesia", "china", "philippine", "philippines", "argentina", "japan", "zimbabwe", "ghana", "canada", "australia", "america", "usa", "europe", "eu", "vietnam", "malaysia", "us"}
+        minerals_en = {"nickel", "lithium", "cobalt", "copper", "rare", "earth", "graphite", "silicon", "gallium", "germanium", "antimony"}
+        
+        found_countries = [c for c in countries_en if c in target_name.lower()]
+        found_minerals = [m for m in minerals_en if m in target_name.lower()]
+        if found_countries and found_minerals:
+            c_q = found_countries[0].capitalize()
+            if found_countries[0] in ("eu", "usa", "us"):
+                c_q = found_countries[0].upper()
+            m_q = found_minerals[0].capitalize()
+            if found_minerals[0] in ("rare", "earth"):
+                m_q = "Rare"
+            
+            payload["filter"]["or"].append({
+                "and": [
+                    {"property": "政策名称", "title": {"contains": c_q}},
+                    {"property": "政策名称", "title": {"contains": m_q}}
+                ]
+            })
 
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=10)
         if res.status_code == 200:
             results = res.json().get("results", [])
             for page in results:
-                # 获取候选页面标题
                 page_props = page.get("properties", {})
                 title_prop = page_props.get("政策名称", {})
                 candidate_title = ""
                 if title_prop and title_prop.get("title"):
                     candidate_title = title_prop["title"][0].get("plain_text", "").strip()
                 
-                # 精确匹配直通车
                 if candidate_title == target_name:
                     return True, page["id"]
                 
-                # 模糊相似度加校验匹配
                 if _calculate_title_similarity(target_name, candidate_title):
                     logger.info(f"🔍 [模糊去重] 发现高度相似条目：『{candidate_title}』与新政策『{target_name}』匹配成功，执行合并更新。")
                     return True, page["id"]
-                    
         return False, None
     except Exception as e:
         logger.warning(f"   ⚠️ Notion 去重查询异常: {e}")
@@ -1190,6 +1305,41 @@ def _notion_search_by_rich_text(property_name: str, value: str):
             results = res.json().get("results", [])
             if results:
                 logger.info(f"🔍 [文件签名去重] 通过 {property_name} 命中已有政策文件。")
+                return True, results[0]["id"]
+        return False, None
+    except Exception as e:
+        logger.warning(f"   ⚠️ Notion {property_name} 查重异常: {e}")
+        return False, None
+
+
+def _notion_search_by_url(property_name: str, value: str):
+    """v5.5: 按 Notion url 属性精确查重，主要用于原文链接查重。"""
+    notion_token = os.environ.get("NOTION_TOKEN")
+    database_id = os.environ.get("NOTION_DATABASE_ID")
+    target_value = (value or "").strip()
+    if not notion_token or not database_id or notion_token == "disabled" or not target_value:
+        return False, None
+
+    url = f"https://api.notion.com/v1/databases/{database_id}/query"
+    headers = {
+        "Authorization": f"Bearer {notion_token}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    payload = {
+        "filter": {
+            "property": property_name,
+            "url": {"equals": target_value}
+        },
+        "page_size": 1,
+    }
+
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        if res.status_code == 200:
+            results = res.json().get("results", [])
+            if results:
+                logger.info(f"🔍 [URL去重] 通过 {property_name} 命中已有政策文件。")
                 return True, results[0]["id"]
         return False, None
     except Exception as e:
@@ -2000,6 +2150,16 @@ def insert_to_notion(data, source_url):
     article_type = data.get("news_recency_verification", {}).get("article_type", "News_Report")
     references_existing = data.get("news_recency_verification", {}).get("references_existing_document", False)
     document_type = entity.get("document_type") or pd.get("document_type", "Other")
+
+    # ---- v5.5: 原文链接精确去重 ----
+    if source_url and source_url not in ("disabled", ""):
+        exists, existing_page_id = _notion_search_by_url("原文链接", source_url)
+        if exists and existing_page_id:
+            if article_type in ("News_Report", "Analysis_Commentary", "Expert_Opinion"):
+                _notion_append_news(existing_page_id, data, source_url, article_type)
+            else:
+                _notion_update_policy(existing_page_id, data, source_url)
+            return {"is_new": False, "page_id": existing_page_id}
 
     # ---- v5.0: 官方原名精确去重 ----
     exists, existing_page_id = _notion_search_pages(official_name, chinese_name)

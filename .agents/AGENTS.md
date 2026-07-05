@@ -23,7 +23,7 @@ This document defines the core domain rules and logic constraints for this speci
 - `news_recency_verification.dingtalk_alert_required == false` 时必须视为硬闸门，禁止推送。
 - `_numbers_flagged > 0` 时必须进入人工复核，不得直接推送。
 - `semantic_diff.has_material_change == false` 时保持静默，即使旧文件的烈度字段为高，也不能升级为告警。
-- Notion 去重优先使用 `policy_entity.official_name`，其次使用 `document_signature` 兜底，避免标题变体重复建档。
+- Notion 去重遵循 v5.5 规范：首道防线使用 `原文链接` 精确过滤 URL，第二道防线使用 `policy_entity.official_name` 核心清洗后模糊检索，第三道防线使用 `document_signature` 兜底；相似度计算针对英文采用单词词组级 Jaccard (>=0.60) 与 Overlap (>=0.85)，并支持括号内简称/全称的递归比对，防止因行政前缀噪声/翻译错位/简称变体引起重复建档。
 - 钉钉输出不得包含 `⚠️` 这类模型自检标记；复核标记仅保留在 Notion 内部字段。
 
 ## 4. Name Normalization & Cleaners (名称归一化规则)

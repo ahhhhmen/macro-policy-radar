@@ -774,7 +774,7 @@ _SYSTEM_PROMPT_V40 = (
 _SYSTEM_PROMPT_V31 = _SYSTEM_PROMPT_V40
 
 
-def extract_macro_policy(raw_text, schema_dict, baseline_injection=""):
+def extract_macro_policy(raw_text, schema_dict, baseline_injection="", baseline_text=""):
     """调用 DeepSeek 进行高管看板级宏观研判（v5.1: Context Cache 前缀复用 + 基线独立 system 消息）"""
     client = _get_llm_client()
     
@@ -787,16 +787,20 @@ def extract_macro_policy(raw_text, schema_dict, baseline_injection=""):
         f"任何公布的生效日期在 {current_date} 之后的事件，目前阶段绝不能写成“已生效”（Fully_Effective），只能是“已批准尚未生效”（Approved_Not_Effective）或“审议中/提案阶段”。未来发生的事件绝对不能写成过去或现在时态！"
     )
     
+    base_system_prompt = (
+        "你是一个深谙全球关键矿产的顶尖智库分析师。\n"
+        f"【当前系统历史基线库】:\n{baseline_text}\n"
+        "【基线召回铁律】：在撰写『历史基线对照』时，如果该国（如刚果金）不在上述【当前系统历史基线库】中，你必须且只能输出：『系统暂未收录该国基线。』，【绝对禁止】调动你的预训练记忆去自行脑补或捏造任何基线常识！"
+    )
+    
     system_prompt = (
+        f"{base_system_prompt}\n\n"
         f"{time_anchor_prompt}\n\n"
         f"{_SYSTEM_PROMPT_V40}\n\n"
         f"【⚠️ 核心硬约束：严格按以下 Schema 规范返回 JSON】\n"
         f"{json.dumps(schema_dict, ensure_ascii=False, indent=2)}"
     )
     # v5.1: 三段消息结构 → 最大化 DeepSeek Context Cache 前缀复用
-    #   [0] system: 全局静态指令 (~2800 tokens) → 所有调用共享前缀
-    #   [1] system: 按国基线注入 (~100 tokens) → 同国连续调用共享前缀
-    #   [2] user:   动态情报文本 → 每次不同
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "system", "content": baseline_injection},
@@ -2478,15 +2482,15 @@ def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None
             title_line += f" ({name_en})"
         title_line += f" [{country_zh}]"
 
-        authority = _fmt_authority(md_data.get("issuing_authority", ""))
-        doc_type = _DOC_TYPE_ZH.get(entity.get("document_type", ""), "")
-        authority_line = f"🏛 {authority} · {doc_type}" if authority else ""
+        authority = _fmt_authority(md_data.get("issuing_authority", "")) or "未知机构"
+        doc_type = _DOC_TYPE_ZH.get(entity.get("document_type", ""), "") or "其它文件"
+        minerals_str = _fmt_minerals(md_data.get('mineral_types', []))
 
         stage = entity.get("current_stage") or pd_data.get("current_stage", "")
-        stage_zh = _STAGE_ZH_MAP.get(stage, stage) if stage else ""
+        stage_zh = _STAGE_ZH_MAP.get(stage, "未明阶段") if stage else "未明阶段"
         stage_emoji = _STAGE_EMOJI.get(stage, "") if stage else ""
         eff_date = pd_data.get("effective_date", "")
-        stage_line = f"{stage_emoji} {stage_zh}" if stage_zh else ""
+        stage_line = f"{stage_emoji} {stage_zh}"
         if eff_date and eff_date != "unknown":
             stage_line += f" ｜ 生效 {eff_date}"
 
@@ -2494,7 +2498,6 @@ def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None
         confidence = si_data.get("analytic_confidence", "")
         impact_emoji = _IMPACT_EMOJI.get(impact, "")
         conf_emoji = _CONFIDENCE_EMOJI.get(confidence, "")
-        impact_line = f"⚖️ 冲击烈度：<font color='{impact_color}'>{impact_emoji} {_fmt_impact(impact)}</font> ｜ 🎯 置信度：{conf_emoji} {_CONFIDENCE_ZH_MAP.get(confidence, confidence)}"
 
         paradigm_block = ""
         if si_data.get("baseline_shift_detected") is True:
@@ -2511,18 +2514,12 @@ def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None
         lines = [title_line]
         if paradigm_block:
             lines.append(paradigm_block)
-        if authority_line:
-            lines.append(authority_line)
-        lines.append(f"💎 涉及矿产：{_fmt_minerals(md_data.get('mineral_types', []))}")
-        if stage_line:
-            lines.append(stage_line)
-        lines.append(impact_line)
-        lines.append("📜 **核心事实**")
-        lines.append(factual[:300] if factual else "(未提取到事实层内容)")
-        lines.append("⚓ **基线对照**")
-        lines.append(baseline[:200] if baseline else "(未提取到基线层内容)")
-        lines.append("🔮 **节点推演**")
-        lines.append(deduction[:300] if deduction else "(未提取到分析层内容)")
+        lines.append(f"🏛 {authority} · {doc_type} ｜ 💎 {minerals_str} ｜ {stage_line}")
+        lines.append(f"⚖️ 冲击烈度：<font color='{impact_color}'>{impact_emoji} {_fmt_impact(impact)}</font> ｜ 🎯 置信度：{conf_emoji} {_CONFIDENCE_ZH_MAP.get(confidence, confidence)}")
+        lines.append("---")
+        lines.append(f"**📜 核心事实**\n> {factual if factual else '(未提取到事实层内容)'}\n")
+        lines.append(f"**⚓ 历史基线对照**\n{baseline if baseline else '(未提取到基线层内容)'}\n")
+        lines.append(f"**🔮 节点推演**\n{deduction if deduction else '(未提取到分析层内容)'}\n")
         lines.append(_fmt_source_link(source_url))
         return "\n".join(lines)
 
@@ -2538,9 +2535,9 @@ def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None
         impact = si_data.get("supply_chain_impact_level", "")
         impact_emoji = _IMPACT_EMOJI.get(impact, "")
 
-        event_summary = event.get("event_summary") or pd_data.get("substantive_provisions") or ""
+        event_summary = event.get("routine_brief") or event.get("event_summary") or pd_data.get("substantive_provisions") or ""
         event_summary = _strip_sanitizer_markers(event_summary)
-        if len(event_summary) > 120:
+        if not event.get("routine_brief") and len(event_summary) > 120:
             event_summary = event_summary[:120] + "..."
 
         line = (
@@ -2646,6 +2643,13 @@ if __name__ == "__main__":
     baselines, baseline_updated = load_knowledge_baselines(
         os.path.join(PROJECT_DIR, "knowledge_baselines.yaml")
     )
+
+    # v5.6: 构建全局基线文本，用于防止大模型幻觉脑补
+    baseline_text_list = []
+    for code, rules in baselines.items():
+        joined_rules = "；".join(rules)
+        baseline_text_list.append(f"- {code}: {joined_rules}")
+    baseline_text = "\n".join(baseline_text_list)
 
     logger.info(f"📡 数字化情报网络就绪。当前天网总线共挂载 {len(all_active_sources)} 个探测节点。")
     logger.info(f"🌐 NewsAPI: {', '.join(NEWSAPI_LANGUAGES)} | RSS 兜底: {', '.join(RSS_FALLBACK_LANGUAGES)}")
@@ -2756,7 +2760,7 @@ if __name__ == "__main__":
         source_country = source.get("country", "GLOBAL")
         baseline_injection = _inject_baseline(source_country, baselines, baseline_updated)
 
-        analysis_result = extract_macro_policy(fetched_text, schema, baseline_injection)
+        analysis_result = extract_macro_policy(fetched_text, schema, baseline_injection, baseline_text)
         cb.record_ai_call()
 
         if analysis_result:

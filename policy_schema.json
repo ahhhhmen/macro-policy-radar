@@ -63,6 +63,10 @@
           "type": "string",
           "description": "提炼本次新闻的核心事实。⚠️ 数据容错铁律：若原文具体日期/数字/版本号存在排版乱码或提取不确定，【绝对禁止】输出形如 '-/31'、'.0'、'/1' 的残缺符号！遇到脏数据必须立刻平滑转化为通顺的『定性描述』（如：将残缺日期转为『过渡期至8月底』，将乱码版本号转为『强制进行新版海关系统申报』）。确保高管阅读语言流畅专业。限200字。"
         },
+        "routine_brief": {
+          "type": "string",
+          "description": "【常规动态专属】如果判定为常规新闻/评论，请用不超过50个字的单句进行极简概括（必须是一个完整的句子），绝不能输出半句话。"
+        },
         "event_classification": {
           "type": "string",
           "enum": ["New_Policy_Issuance","Milestone_Amendment","Routine_Commentary"],

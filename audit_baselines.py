@@ -23,13 +23,18 @@ import yaml
 import time
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from radar_infra.llm import DeepSeekProvider, CachedLLMClient
 
 _llm_client = None
+
+def _has_llm_credentials():
+    """v5.1: CI shadow audit can be skipped cleanly when secrets are unavailable."""
+    return bool((os.environ.get("DEEPSEEK_API_KEY") or "").strip())
 
 def _get_llm_client():
     global _llm_client
     if _llm_client is None:
+        from radar_infra.llm import DeepSeekProvider, CachedLLMClient
+
         _llm_client = CachedLLMClient(DeepSeekProvider())
     return _llm_client
 
@@ -258,6 +263,19 @@ def _print_ci_warning(message):
     print(f"\n::warning::{message}")
 
 
+def _skip_when_llm_credentials_missing():
+    """v5.1: Secret-less scheduled runs should warn instead of failing red."""
+    if _has_llm_credentials():
+        return False
+    message = (
+        "DEEPSEEK_API_KEY 未配置，跳过季度基线 AI 审计；"
+        "请在 GitHub Secrets 中配置 DEEPSEEK_API_KEY 后重新运行。"
+    )
+    print(f"\n⚪ {message}")
+    _print_ci_warning(message)
+    return True
+
+
 def _get_rules_for_entry(entry):
     """从基线条目中提取规则列表，同时兼容 v2.0 (rules) 和 v3.0 (documents)"""
     if not entry:
@@ -293,6 +311,9 @@ if __name__ == "__main__":
         config = yaml.safe_load(f) or {}
     baselines = config.get("baselines", {})
     print(f"📚 已加载 {len(baselines)} 个国家基线: {list(baselines.keys())}")
+
+    if _skip_when_llm_credentials_missing():
+        sys.exit(0)
 
     # 单国模式
     if args.country:

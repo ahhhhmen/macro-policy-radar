@@ -2432,27 +2432,29 @@ def _fmt_provisions(text):
     return "\n".join(bullets)
 
 
-def send_dingtalk_digest(policies, discovered_sources=None):
-    """将本轮所有通过门控的政策合并为单条钉钉摘要卡片（基于 radar_infra.sink.send_dingtalk）。"""
+def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None):
+    """v5.6: 将本轮政策合并为“地缘政策智能简报”卡片推送，按锂、钴、镍及其他分类排版。"""
     webhook_url = os.environ.get("DINGTALK_WEBHOOK")
     if not webhook_url or webhook_url == "disabled":
         logger.info("暂未配置钉钉 Webhook，跳过告警触达阶段。")
         return
 
-    # 按冲击烈度排序：High_Disruption 在前
+    silent_policies = silent_policies or []
     impact_order = {"High_Disruption": 0, "Moderate_Adjustment": 1, "Low_Monitoring": 2}
-    policies_sorted = sorted(
-        policies,
-        key=lambda p: impact_order.get(
-            p[0].get("strategic_implications", {}).get("supply_chain_impact_level", ""), 2
-        )
-    )
 
-    n = len(policies_sorted)
+    def _get_mineral_group(data):
+        mineral_list = data.get("metadata", {}).get("mineral_types") or []
+        lowered = [m.lower() for m in mineral_list]
+        if "lithium" in lowered:
+            return "Lithium"
+        elif "cobalt" in lowered:
+            return "Cobalt"
+        elif "nickel" in lowered:
+            return "Nickel"
+        else:
+            return "Others"
 
-    # v5.3: 三层结构卡片 —— 事实层 → 基线层 → 分析层（防幻觉 + 决策参考）
-    blocks = []
-    for i, (data, source_url) in enumerate(policies_sorted, 1):
+    def _format_alert_policy(data, source_url, index):
         entity = data.get("policy_entity", {}) or {}
         event = data.get("event_update", {}) or {}
         md_data = data.get("metadata", {}) or {}
@@ -2469,22 +2471,16 @@ def send_dingtalk_digest(policies, discovered_sources=None):
 
         name_cn = entity.get("chinese_translation") or pd_data.get("policy_name_zh") or entity.get("official_name") or "(未命名)"
         name_en = entity.get("official_name", "")
+        country_zh = _fmt_country(md_data.get('country', '?'))
 
-        # ── 标题行（含政策名称，一目了然）──
+        title_line = f"🔴 **【{alert_label}】{name_cn}**"
         if name_en and name_en != name_cn:
-            title_line = f"{alert_label} #{i}：{name_cn}  ({name_en})"
-        else:
-            title_line = f"{alert_label} #{i}：{name_cn}"
+            title_line += f" ({name_en})"
+        title_line += f" [{country_zh}]"
 
-        # ── 元数据行 ──
         authority = _fmt_authority(md_data.get("issuing_authority", ""))
         doc_type = _DOC_TYPE_ZH.get(entity.get("document_type", ""), "")
-        if authority and doc_type:
-            authority_line = f"🏛 {authority} · {doc_type}"
-        elif authority:
-            authority_line = f"🏛 {authority}"
-        else:
-            authority_line = ""
+        authority_line = f"🏛 {authority} · {doc_type}" if authority else ""
 
         stage = entity.get("current_stage") or pd_data.get("current_stage", "")
         stage_zh = _STAGE_ZH_MAP.get(stage, stage) if stage else ""
@@ -2498,8 +2494,8 @@ def send_dingtalk_digest(policies, discovered_sources=None):
         confidence = si_data.get("analytic_confidence", "")
         impact_emoji = _IMPACT_EMOJI.get(impact, "")
         conf_emoji = _CONFIDENCE_EMOJI.get(confidence, "")
+        impact_line = f"⚖️ 冲击烈度：<font color='{impact_color}'>{impact_emoji} {_fmt_impact(impact)}</font> ｜ 🎯 置信度：{conf_emoji} {_CONFIDENCE_ZH_MAP.get(confidence, confidence)}"
 
-        # ── 范式转移警告（Blockquote 提亮，视觉优先）──
         paradigm_block = ""
         if si_data.get("baseline_shift_detected") is True:
             paradigm_block = (
@@ -2508,52 +2504,113 @@ def send_dingtalk_digest(policies, discovered_sources=None):
                 "> 请核查 knowledge_baselines.yaml 是否需要更新。"
             )
 
-        # ── 组合卡片 ──
-        meta_lines = [title_line, ""]
-        if paradigm_block:
-            meta_lines.append(paradigm_block)
-            meta_lines.append("")
-        if authority_line:
-            meta_lines.append(authority_line)
-        meta_lines.append(f"🌍 {_fmt_country(md_data.get('country', '?'))} ｜ 💎 {_fmt_minerals(md_data.get('mineral_types', []))}")
-        if stage_line:
-            meta_lines.append(stage_line)
-        # 冲击烈度用颜色强调
-        meta_lines.append(f"⚖️ 冲击烈度：<font color='{impact_color}'>{impact_emoji} {_fmt_impact(impact)}</font> ｜ 🎯 置信度：{conf_emoji} {_CONFIDENCE_ZH_MAP.get(confidence, confidence)}")
-        master_tag = entity.get("master_tag", "")
-        tag_zh = _MASTER_TAG_ZH.get(master_tag, "")
-        if tag_zh:
-            meta_lines.append(f"🏷 {tag_zh}")
-
-        # ── 三层结构（数字净化标记已移除，Notion 保留供复核）──
         factual = _strip_sanitizer_markers(pd_data.get("substantive_provisions") or pd_data.get("factual_basis") or "")
         baseline = _strip_sanitizer_markers(si_data.get("industry_baseline_recall", ""))
         deduction = _strip_sanitizer_markers(event.get("event_impact_deduction") or si_data.get("impact_deduction", ""))
 
-        block = "\n\n".join([
-            *meta_lines,
-            "─────────────────────",
-            "📜 **核心事实层**（原文可核）",
-            (factual[:400] if factual else "(未提取到事实层内容)"),
-            "",
-            "⚓ **历史基线对照**（行业共识）",
-            (baseline[:300] if baseline else "(未提取到基线层内容)"),
-            "",
-            "🔮 **节点战略推演**（Directional Impact）",
-            (deduction[:400] if deduction else "(未提取到分析层内容)"),
-            "",
-            _fmt_source_link(source_url),
-        ])
-        blocks.append(block)
+        lines = [title_line]
+        if paradigm_block:
+            lines.append(paradigm_block)
+        if authority_line:
+            lines.append(authority_line)
+        lines.append(f"💎 涉及矿产：{_fmt_minerals(md_data.get('mineral_types', []))}")
+        if stage_line:
+            lines.append(stage_line)
+        lines.append(impact_line)
+        lines.append("📜 **核心事实**")
+        lines.append(factual[:300] if factual else "(未提取到事实层内容)")
+        lines.append("⚓ **基线对照**")
+        lines.append(baseline[:200] if baseline else "(未提取到基线层内容)")
+        lines.append("🔮 **节点推演**")
+        lines.append(deduction[:300] if deduction else "(未提取到分析层内容)")
+        lines.append(_fmt_source_link(source_url))
+        return "\n".join(lines)
 
-    combined_body = "\n\n".join(blocks)
-    header = f"📡 宏观政策雷达 · 本期 {n} 条预警"
+    def _format_silent_policy(data, source_url):
+        entity = data.get("policy_entity", {}) or {}
+        event = data.get("event_update", {}) or {}
+        md_data = data.get("metadata", {}) or {}
+        pd_data = data.get("policy_dynamics", {}) or {}
+        si_data = data.get("strategic_implications", {}) or {}
+
+        name_cn = entity.get("chinese_translation") or pd_data.get("policy_name_zh") or entity.get("official_name") or "(未命名)"
+        country_zh = _fmt_country(md_data.get('country', '?'))
+        impact = si_data.get("supply_chain_impact_level", "")
+        impact_emoji = _IMPACT_EMOJI.get(impact, "")
+
+        event_summary = event.get("event_summary") or pd_data.get("substantive_provisions") or ""
+        event_summary = _strip_sanitizer_markers(event_summary)
+        if len(event_summary) > 120:
+            event_summary = event_summary[:120] + "..."
+
+        line = (
+            f"⚪ **【常规/评论】{name_cn}** [{country_zh}]\n"
+            f"  ⚖️ 冲击烈度：{impact_emoji} {_fmt_impact(impact)} ｜ 🔗 [查看原文]({source_url})\n"
+            f"  📝 **动态简述**：{event_summary}"
+        )
+        return line
+
+    # 按照矿种分组：Lithium, Cobalt, Nickel, Others
+    groups = {
+        "Lithium": {"alerts": [], "silent": []},
+        "Cobalt": {"alerts": [], "silent": []},
+        "Nickel": {"alerts": [], "silent": []},
+        "Others": {"alerts": [], "silent": []}
+    }
+
+    for item in policies:
+        data, url = item
+        grp = _get_mineral_group(data)
+        groups[grp]["alerts"].append(item)
+
+    for item in silent_policies:
+        data, url = item
+        grp = _get_mineral_group(data)
+        groups[grp]["silent"].append(item)
+
+    group_titles = {
+        "Lithium": "🔋 锂矿地缘动态 (Lithium)",
+        "Cobalt": "🔋 钴矿地缘动态 (Cobalt)",
+        "Nickel": "🔋 镍矿地缘动态 (Nickel)",
+        "Others": "🔌 其他关键金属 (Copper, Rare Earths, Graphite, etc.)"
+    }
+
+    group_blocks = []
+    for grp in ["Lithium", "Cobalt", "Nickel", "Others"]:
+        title_block = group_titles[grp]
+        grp_data = groups[grp]
+
+        if grp_data["alerts"] or grp_data["silent"]:
+            section_lines = [f"\n━━━━━━━━━━━━━━━━━━━━━━\n### {title_block}"]
+            if grp_data["alerts"]:
+                section_lines.append("🚨 **【重磅预警】**")
+                grp_data["alerts"].sort(
+                    key=lambda p: impact_order.get(p[0].get("strategic_implications", {}).get("supply_chain_impact_level", ""), 2)
+                )
+                for idx, (d, u) in enumerate(grp_data["alerts"], 1):
+                    section_lines.append(_format_alert_policy(d, u, idx))
+                    section_lines.append("")
+
+            if grp_data["silent"]:
+                section_lines.append("💬 **【常规动态】**")
+                for d, u in grp_data["silent"]:
+                    section_lines.append(_format_silent_policy(d, u))
+                    section_lines.append("")
+
+            group_blocks.append("\n".join(section_lines))
+
+    combined_body = "\n\n".join(group_blocks)
     
-    # ── 新增：自动寻源报告 ──
+    header = (
+        f"📡 **【宏观政策雷达】关键矿产地缘政策周报**\n"
+        f"📅 **简报时间**：{datetime.now().strftime('%Y-%m-%d')}\n"
+        f"📊 **监测概览**：🔴 重磅预警 {len(policies)} 条 ｜ ⚪ 常规动态 {len(silent_policies)} 条"
+    )
+
     discovery_section = ""
     if discovered_sources:
         lines = [
-            "━━━━━━━━━━━━━━━━━━━━━━",
+            "\n━━━━━━━━━━━━━━━━━━━━━━",
             "✨ **【自动寻源发现】本轮捕获到以下新官方网站域名：**",
         ]
         for ds in discovered_sources:
@@ -2562,9 +2619,9 @@ def send_dingtalk_digest(policies, discovered_sources=None):
                 f"  📄 样本政策：[{ds['sample_policy_title']}]({ds['sample_article_url']})"
             )
         lines.append("💡 *已记入 discovered_sources.yaml 待处理池，请确认后添加至 sources.yaml*")
-        discovery_section = "\n" + "\n".join(lines)
+        discovery_section = "\n".join(lines)
 
-    full_text = f"{header}\n\n{combined_body}\n\n━━━━━━━━━━━━━━━━━━━━━━\n📋 已同步存入 Notion 情报资产库{discovery_section}"
+    full_text = f"{header}\n{combined_body}\n\n━━━━━━━━━━━━━━━━━━━━━━\n📋 监测数据已同步入 Notion 资产库{discovery_section}"
 
     send_dingtalk(
         webhook_url=webhook_url,
@@ -2615,6 +2672,8 @@ if __name__ == "__main__":
 
     # v3.5: 收集本轮所有通过门控的政策，循环结束后合并为单条摘要推送
     pending_alerts = []
+    # v5.6: 收集常规/静默入库的监测动态以供简报呈现
+    silent_policies = []
 
     # v5.3: 轮询交错排序 → 不同国家源交替处理，防止同国连续触发熔断
     # 按国家分组后 round-robin 取出，确保熔断前每个国家都有机会被扫描
@@ -2831,15 +2890,13 @@ if __name__ == "__main__":
                 pending_alerts.append((analysis_result, source_url))
                 logger.warning(f"🚨 [推送] {push_reason}")
             else:
+                silent_policies.append((analysis_result, source_url))
                 logger.info(f"🤫 [静默入库] {push_reason}")
 
     # ---- v3.5: 汇总推送 ----
-    if pending_alerts:
-        logger.info(f"\n📬 本轮共 {len(pending_alerts)} 条政策通过研判，正在汇总为单条摘要推送...")
-        send_dingtalk_digest(pending_alerts, discovered_sources_this_run)
-    elif discovered_sources_this_run:
-        logger.info(f"\n📬 本轮无告警政策，但捕获到 {len(discovered_sources_this_run)} 个新官方站点域名，进行寻源推送...")
-        send_dingtalk_digest([], discovered_sources_this_run)
+    if pending_alerts or silent_policies or discovered_sources_this_run:
+        logger.info(f"\n📬 本轮共 {len(pending_alerts)} 条警告政策，{len(silent_policies)} 条常规政策，正在汇总为地缘简报推送...")
+        send_dingtalk_digest(pending_alerts, silent_policies, discovered_sources_this_run)
     else:
         logger.info("\nℹ️ 本轮无政策达到钉钉推送阈值。")
 

@@ -26,6 +26,7 @@ This document defines the core domain rules and logic constraints for this speci
 - Notion 去重遵循 v5.5 规范：首道防线使用 `原文链接` 精确过滤 URL，第二道防线使用 `policy_entity.official_name` 核心清洗后模糊检索，第三道防线使用 `document_signature` 兜底；相似度计算针对英文采用单词词组级 Jaccard (>=0.60) 与 Overlap (>=0.85)，并支持括号内简称/全称的递归比对，防止因行政前缀噪声/翻译错位/简称变体引起重复建档。
 - 钉钉输出不得包含 `⚠️` 这类模型自检标记；复核标记仅保留在 Notion 内部字段。
 - 钉钉推送采用 v5.6 智能简报格式：将监测动态按锂、钴、镍、其它关键金属进行分组排版，重磅警告展示完整三层研判，常规动态以紧凑列表合并展现，保障信息完备度。
+- v5.7 监控网拓宽：宏观雷达不仅追踪 10 种特定关键金属，亦涵盖以循环经济、再生回收目标（如再生塑料/钢/铝/镁回收门槛、EPR 生产者延伸责任、报废车辆 ELV 追溯）为切入点且辐射关键原材料供应链的跨行业上位法案。寻源矩阵需在 `policy_keywords` 中涵盖相关回收合规术语，且在 `broad_minerals` 兜底中包含 "critical raw materials" 和 "critical materials" 等概念伞。
 
 ## 4. Name Normalization & Cleaners (名称归一化规则)
 <!-- Define mapping lists for data normalization to clean messy source inputs. -->

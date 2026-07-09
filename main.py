@@ -607,7 +607,7 @@ def generate_queries_from_matrix(matrix_config, max_keywords_per_query=8):
             })
 
     # 兜底宽泛查询（同样分批次）
-    broad_minerals = " OR ".join(f'"{m}"' if " " in m else m for m in ["critical minerals", "battery metals", "energy transition minerals"])
+    broad_minerals = " OR ".join(f'"{m}"' if " " in m else m for m in ["critical minerals", "battery metals", "energy transition minerals", "critical raw materials", "critical materials"])
     for bi, batch in enumerate(keyword_batches):
         clause = " OR ".join(f'"{kw}"' if " " in kw else kw for kw in batch)
         broad = f"({broad_minerals}) AND ({clause})"

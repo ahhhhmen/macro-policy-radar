@@ -6,7 +6,7 @@ This document defines the core domain rules and logic constraints for this speci
 
 ## 1. Project Positioning & Architecture
 - 全球关键矿产宏观地缘政策情报引擎，自动化采集→分析→过滤→推送流水线。
-- 单文件主引擎 `main.py`（1743 行），管道式无状态设计。
+- 单文件主引擎 `main.py`（约 2910 行），管道式无状态设计。
 - 配置全外置：`sources.yaml`（情报源）、`policy_schema.json`（LLM Schema）、`knowledge_baselines.yaml`（基线库，v3.0 起采用 documents 结构化列表，且影子审计脚本 audit_baselines.py 已适配此结构）、`.env`（凭证）。
 - 五道防线：杀伤开关→关键词噪音→旧规拦截→时效校验→数字捏造净化。
 - GitHub Actions 每周一 09:00 CST 自动运行。
@@ -37,6 +37,13 @@ This document defines the core domain rules and logic constraints for this speci
 - `discovered_sources.yaml` 只记录候选新源，不写入凭证或私密原始数据。
 - 任何临时调试输出、下载的新闻原文、人工标注草稿都不得加入版本控制。
 - 若新增测试依赖外部服务，必须提供本地可运行的 stub 或 mock，不得强迫 CI 以真实密钥回放。
+
+## 7. CI / GitHub Operations Consensus (CI 与远端同步共识)
+- `audit_baselines.py` 的季度影子审计依赖 `DEEPSEEK_API_KEY`。GitHub Actions 中若该 secret 未配置，脚本必须输出 `::warning::` 并以退出码 0 跳过 AI 审计，不得让季度任务红灯；配置 secret 后才执行真实 DeepSeek 审计。
+- `OPENAI_API_KEY` 不得被视为季度基线审计的可用凭证；当前 `DeepSeekProvider()` 明确要求 `DEEPSEEK_API_KEY`。
+- 缺少外部服务凭证的测试必须使用本地 stub/mock，覆盖无密钥降级路径，禁止要求 CI 使用真实密钥回放。
+- 判断“是否已完全更新到 GitHub”时，至少检查 `git status --short`、当前分支、本地 `HEAD` 与 `origin/<branch>` 是否一致；如网络允许，再用 `git ls-remote` 核对远端真实哈希。
+- 工作区里的未跟踪副本文件（例如 `main 2.py`）不得默认推送。若其内容匹配历史提交或明显是本地备份，应视为非生产文件；经用户确认后删除，避免把过期主引擎副本加入仓库。
 
 ---
 

@@ -66,6 +66,12 @@ query_matrix:
     - "Critical Minerals Strategy"
     - "Green Subsidy"
     - "IRA"
+    # 循环经济与再生回收类（新增 — 覆盖车辆/电池等回收法案，v5.7）
+    - "Circularity Rules"
+    - "Recycling Targets"
+    - "Recycled Content"
+    - "End-of-Life Vehicles"
+    - "Extended Producer Responsibility"
   days_back: 7
 
 # ---- 第 3 层：自适应热点发现（方案 B — 已启用）----
@@ -405,4 +411,20 @@ macro_sources:
     feed_type: "rss"
     url: "https://news.google.com/rss/search?q=site:*.gouv.cd+(cobalt+OR+cuivre+OR+exportation+OR+redevance)&hl=fr&gl=CD&ceid=CD:fr"
     enabled: true
+
+  - id: "eu_wildcard_gov_rss"
+    country: "EU"
+    agency: "欧盟政府及立法机构通配域名扫描"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:*.europa.eu+(\"critical+raw+materials\"+OR+\"circularity\"+OR+\"recycling\"+OR+\"recycled\"+OR+\"end-of-life+vehicles\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+    notes: "v5.7 新增：自动打捞欧盟理事会/欧委会/欧洲议会官网关于关键原材料、循环经济及报废车辆的新规首发公告"
+
+  - id: "global_circular_economy_rss"
+    country: "GLOBAL"
+    agency: "全球关键原材料循环经济与回收政策专线"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=(\"critical+materials\"+OR+\"battery+metals\"+OR+metals)+(\"circularity\"+OR+\"recycling+targets\"+OR+\"recycled+content\")+policy&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+    notes: "v5.7 新增：专门捕获全球范围内针对金属与电池原材料回收、循环经济立法的行业解读与政策动态"
 

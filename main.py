@@ -353,22 +353,150 @@ def _is_within_age(pub_date_str, max_days=RSS_MAX_AGE_DAYS):
     return age <= timedelta(days=max_days)
 
 
+_HTTP_URL_RE = re.compile(r"https?://[^\s\"'<>\\]+", re.I)
+_GOOGLE_HOST_RE = re.compile(r"(^|\.)(google|gstatic|googleapis|googleusercontent|youtube|ytimg|google-analytics|googletagmanager)\.", re.I)
+
+
+def _is_google_url(url: str) -> bool:
+    try:
+        host = urllib.parse.urlparse(url).netloc.lower()
+    except Exception:
+        return False
+    return bool(_GOOGLE_HOST_RE.search(host))
+
+
+def _is_valid_news_url(url: str) -> bool:
+    if not url:
+        return False
+    if _is_google_url(url):
+        return False
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.netloc.lower()
+        path = parsed.path.lower()
+    except Exception:
+        return False
+
+    ignored_hosts = (
+        "google-analytics.com",
+        "googletagmanager.com",
+        "googlesyndication.com",
+        "googleadservices.com",
+        "doubleclick.net",
+        "facebook.com",
+        "twitter.com",
+        "linkedin.com",
+    )
+    if any(ih in host for ih in ignored_hosts):
+        return False
+
+    static_extensions = (
+        ".js", ".css", ".png", ".jpg", ".jpeg", ".gif",
+        ".svg", ".ico", ".woff", ".woff2", ".mp4", ".mp3"
+    )
+    if path.endswith(static_extensions):
+        return False
+
+    return True
+
+
+def _clean_candidate_url(raw: str) -> str:
+    import html
+    cleaned = html.unescape(urllib.parse.unquote(str(raw or "").strip()))
+    cleaned = cleaned.rstrip(").,;]}\"'")
+    return cleaned
+
+
+def _extract_original_from_html(html_text: str) -> str:
+    if not html_text:
+        return ""
+    try:
+        soup = BeautifulSoup(html_text, "html.parser")
+        for selector in (
+            ("link", {"rel": "canonical"}),
+            ("meta", {"property": "og:url"}),
+            ("meta", {"name": "twitter:url"}),
+        ):
+            tag = soup.find(*selector)
+            value = ""
+            if tag:
+                value = tag.get("href") or tag.get("content") or ""
+            value = _clean_candidate_url(value)
+            if value and value.startswith("http") and _is_valid_news_url(value):
+                return value
+    except Exception:
+        pass
+    return ""
+
+
 def resolve_google_news_url(google_url):
     """
     解码 Google News 跳转链（news.google.com/rss/articles/...），使用 googlenewsdecoder 拿到真实源 URL。
-    非 Google News 链接或解码失败时原样返回，保证不 worse than before。
+    支持 4层降级机制（库解码 -> 本地 base64 protobuf 解码 -> Query 参数提取 -> 重定向/HTML canonical提取）
+    配合安全白名单拦截，防止链接失效及垃圾链接污染。 (v5.8)
     """
     if not google_url or "news.google.com" not in google_url:
         return google_url
+
+    # Tier 1: 优先使用库解码
     try:
-        from googlenewsdecoder import gnewsdecoder
-        res = gnewsdecoder(google_url)
+        from googlenewsdecoder import GoogleDecoder
+        decoder = GoogleDecoder()
+        res = decoder.decode_google_news_url(google_url)
         if res.get("status") and res.get("decoded_url"):
-            return res["decoded_url"]
-        return google_url
+            decoded_url = res["decoded_url"]
+            if decoded_url.startswith("http") and _is_valid_news_url(decoded_url):
+                return decoded_url
     except Exception as e:
-        logger.warning(f"⚠️ Google News 链接解码失败 [{google_url[:60]}...]: {str(e)[:80]}")
-        return google_url
+        logger.debug(f"googlenewsdecoder failed: {e}")
+
+    # Tier 2: 离线 Base64 Protobuf 提取 (0ms 延迟)
+    if "news.google.com/rss/articles/" in google_url:
+        import base64
+        match = re.search(r'articles/([^?]+)', google_url)
+        if match:
+            encoded_str = match.group(1)
+            padding = 4 - (len(encoded_str) % 4)
+            if padding != 4:
+                encoded_str += "=" * padding
+            try:
+                decoded_bytes = base64.urlsafe_b64decode(encoded_str)
+                decoded_str = decoded_bytes.decode('latin1')
+                url_match = re.search(r'(https?://[^\s\x00-\x1f\x7f-\xff]+)', decoded_str)
+                if url_match and _is_valid_news_url(url_match.group(1)):
+                    return url_match.group(1)
+            except Exception:
+                pass
+
+    # Tier 3: 提取 Query 参数 (0ms 延迟)
+    try:
+        parsed = urllib.parse.urlparse(google_url)
+        qs = urllib.parse.parse_qs(parsed.query)
+        for key in ("url", "u", "q"):
+            for val in qs.get(key, []):
+                candidate = _clean_candidate_url(val)
+                if candidate.startswith("http") and _is_valid_news_url(candidate):
+                    return candidate
+    except Exception:
+        pass
+
+    # Tier 4: 重定向追踪 (HEAD/GET) 与 HTML 结构解析
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        resp = requests.head(google_url, headers=headers, allow_redirects=True, timeout=5)
+        final = resp.url
+        if final != google_url and _is_valid_news_url(final) and len(final) > 15 and final.lower().startswith("http"):
+            return final
+
+        # 如果 HEAD 得到的 URL 不满足或未改变，尝试 GET 请求获取 HTML 里的 Canonical/OG 链接
+        resp_get = requests.get(google_url, headers=headers, allow_redirects=True, timeout=5)
+        candidate = _extract_original_from_html(resp_get.text)
+        if candidate:
+            return candidate
+    except Exception as exc:
+        logger.debug(f"URL HTTP resolve failed: {exc}")
+
+    return google_url
 
 
 def fetch_and_parse_rss(url, limit=3):

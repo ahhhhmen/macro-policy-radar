@@ -27,6 +27,7 @@ This document defines the core domain rules and logic constraints for this speci
 - 钉钉输出不得包含 `⚠️` 这类模型自检标记；复核标记仅保留在 Notion 内部字段。
 - 钉钉推送采用 v5.6 智能简报格式：将监测动态按锂、钴、镍、其它关键金属进行分组排版，重磅警告展示完整三层研判，常规动态以紧凑列表合并展现，保障信息完备度。
 - v5.7 监控网拓宽：宏观雷达不仅追踪 10 种特定关键金属，亦涵盖以循环经济、再生回收目标（如再生塑料/钢/铝/镁回收门槛、EPR 生产者延伸责任、报废车辆 ELV 追溯）为切入点且辐射关键原材料供应链的跨行业上位法案。寻源矩阵需在 `policy_keywords` 中涵盖相关回收合规术语，且在 `broad_minerals` 兜底中包含 "critical raw materials" 和 "critical materials" 等概念伞。
+- v5.8 Google News 链接解析与安全过滤：使用升级版的 `resolve_google_news_url` 进行解码。优先通过 `googlenewsdecoder` 解析；若失败则依次尝试离线解析 Base64 编码路径、提取 URL Query 参数；最后通过 `HEAD/GET` 网络重定向和 HTML Canonical 元数据提取进行兜底。所有解析结果必须经过 `_is_valid_news_url` 强过滤规则，排除统计追踪器、广告链接及样式表、脚本、图片等静态资源，防止数据污染。
 
 ## 4. Name Normalization & Cleaners (名称归一化规则)
 <!-- Define mapping lists for data normalization to clean messy source inputs. -->
@@ -39,6 +40,13 @@ This document defines the core domain rules and logic constraints for this speci
 - `discovered_sources.yaml` 只记录候选新源，不写入凭证或私密原始数据。
 - 任何临时调试输出、下载的新闻原文、人工标注草稿都不得加入版本控制。
 - 若新增测试依赖外部服务，必须提供本地可运行的 stub 或 mock，不得强迫 CI 以真实密钥回放.
+
+## 7. CI / GitHub Operations Consensus (CI 与远端同步共识)
+- `audit_baselines.py` 的季度影子审计依赖 `DEEPSEEK_API_KEY`。GitHub Actions 中若该 secret 未配置，脚本必须输出 `::warning::` 并以退出码 0 跳过 AI 审计，不得让季度任务红灯；配置 secret 后才执行真实 DeepSeek 审计。
+- `OPENAI_API_KEY` 不得被视为季度基线审计的可用凭证；当前 `DeepSeekProvider()` 明确要求 `DEEPSEEK_API_KEY`。
+- 缺少外部服务凭证的测试必须使用本地 stub/mock，覆盖无密钥降级路径，禁止要求 CI 使用真实密钥回放。
+- 判断“是否已完全更新到 GitHub”时，至少检查 `git status --short`、当前分支、本地 `HEAD` 与 `origin/<branch>` 是否一致；如网络允许，再用 `git ls-remote` 核对远端真实哈希。
+- 工作区里的未跟踪副本文件（例如 `main 2.py`）不得默认推送。若其内容匹配历史提交或明显是本地备份，应视为非生产文件；经用户确认后删除，避免把过期主引擎副本加入仓库。
 
 ---
 

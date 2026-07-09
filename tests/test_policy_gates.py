@@ -36,6 +36,9 @@ def _install_radar_infra_stubs():
         return None
 
     class _Logger:
+        def debug(self, *args, **kwargs):
+            pass
+
         def info(self, *args, **kwargs):
             pass
 
@@ -153,6 +156,72 @@ class NotionSignatureDedupeTests(unittest.TestCase):
         payload = post.call_args.kwargs["json"]
         self.assertEqual(payload["filter"]["property"], "文件签名")
         self.assertEqual(payload["filter"]["rich_text"]["equals"], "CN-rare-earth-doc")
+
+
+class GoogleNewsResolutionTests(unittest.TestCase):
+    def test_resolve_valid_news_url(self):
+        # Non-google URLs should be returned unchanged
+        url = "https://example.com/article"
+        self.assertEqual(main.resolve_google_news_url(url), url)
+
+    def test_resolve_google_news_locally(self):
+        # Verify local base64 decode works
+        target_url = "https://www.business-humanrights.org/en/latest-news/global-mineral-tracker-2026"
+        # Create a mock base64 protobuf encoded payload
+        import base64
+        fake_protobuf = b"\x08\x01\x12\x4b" + target_url.encode('utf-8') + b"\x1a\x05stuff"
+        encoded = base64.urlsafe_b64encode(fake_protobuf).decode('utf-8').rstrip('=')
+        google_url = f"https://news.google.com/rss/articles/{encoded}"
+
+        # We mock googlenewsdecoder importing/failing to force fallbacks
+        with patch("googlenewsdecoder.GoogleDecoder.decode_google_news_url", side_effect=Exception("mock fail")):
+            resolved = main.resolve_google_news_url(google_url)
+            self.assertEqual(resolved, target_url)
+
+    def test_resolve_google_news_query_params(self):
+        # Verify query parameters fallback
+        google_url = "https://news.google.com/rss/articles/foo?url=https%3A%2F%2Fexample.com%2Farticle"
+        with patch("googlenewsdecoder.GoogleDecoder.decode_google_news_url", side_effect=Exception("mock fail")):
+            resolved = main.resolve_google_news_url(google_url)
+            self.assertEqual(resolved, "https://example.com/article")
+
+    @patch("main.requests.head")
+    def test_resolve_google_news_via_head_redirect(self, mock_head):
+        # Verify HTTP HEAD redirection works
+        google_url = "https://news.google.com/rss/articles/example"
+        redirected_url = "https://publisher.example.com/story"
+        
+        mock_resp = types.SimpleNamespace(url=redirected_url)
+        mock_head.return_value = mock_resp
+
+        with patch("googlenewsdecoder.GoogleDecoder.decode_google_news_url", side_effect=Exception("mock fail")):
+            resolved = main.resolve_google_news_url(google_url)
+            self.assertEqual(resolved, redirected_url)
+
+    @patch("main.requests.get")
+    @patch("main.requests.head")
+    def test_resolve_google_news_via_html_canonical(self, mock_head, mock_get):
+        # Verify HTML canonical resolution fallback
+        google_url = "https://news.google.com/rss/articles/example"
+        original = "https://publisher.example.com/story"
+
+        # Mock HEAD not redirecting (returning same URL)
+        mock_head.return_value = types.SimpleNamespace(url=google_url)
+        
+        # Mock GET returning HTML containing canonical link
+        html_content = f'<html><head><link rel="canonical" href="{original}"></head></html>'
+        mock_get.return_value = types.SimpleNamespace(url=google_url, text=html_content)
+
+        with patch("googlenewsdecoder.GoogleDecoder.decode_google_news_url", side_effect=Exception("mock fail")):
+            resolved = main.resolve_google_news_url(google_url)
+            self.assertEqual(resolved, original)
+
+    def test_filter_invalid_news_urls(self):
+        # Test that _is_valid_news_url correctly flags trackers and styles
+        self.assertFalse(main._is_valid_news_url("https://fonts.googleapis.com/css?family=Google+Sans"))
+        self.assertFalse(main._is_valid_news_url("https://www.google-analytics.com/collect"))
+        self.assertFalse(main._is_valid_news_url("https://example.com/style.css"))
+        self.assertTrue(main._is_valid_news_url("https://reuters.com/news-story-1"))
 
 
 if __name__ == "__main__":

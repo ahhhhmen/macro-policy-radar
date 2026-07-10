@@ -11,9 +11,11 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from radar_infra.llm import DeepSeekProvider, CachedLLMClient, create_llm_retry_decorator
-from radar_infra.guard import CircuitBreaker, sanitize_numbers
-from radar_infra.sink import send_dingtalk
+from radar_infra.guard import CircuitBreaker, sanitize_numbers, safe_json_parse, clean_chinese_title_noise, clean_title_noise, get_tokens, calculate_title_similarity
+from radar_infra.sink import send_dingtalk, NotionSink, NotionAPIError
 from radar_infra.support import setup_logging
+from radar_infra.fetch import fetch_html, extract_article_body
+
 
 logger = setup_logging("macro_policy_radar")
 
@@ -248,82 +250,9 @@ def log_discovered_source(source_url: str, policy_data: dict, configured_domains
         logger.warning(f"写入 discovered_sources.yaml 失败: {e}")
     return None
 
-def fetch_and_clean_html(url, selector):
-    """【HTML 轨道】抓取原生网页（v3.1: 容忍 SSL 证书过期/自签名）"""
-    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-    try:
-        response = requests.get(url, headers=headers, timeout=15, verify=False)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        target_zone = soup.select_one(selector)
-        if target_zone:
-            for noise in target_zone(["script", "style", "nav", "footer", "header"]): noise.extract()
-            return target_zone.get_text(separator="\n", strip=True)
-        return soup.body.get_text(separator="\n", strip=True) if soup.body else "Empty Body"
-    except Exception as e:
-        logger.warning(f"⚠️ HTML 抓取失败 [{url[:50]}...]: {str(e)[:100]}")
-        return None
-
-
 # v4.0: 二级抓取最小正文长度门槛 —— 低于此值视为抓取失败，降级为摘要
 MIN_FULLTEXT_LENGTH = int(os.environ.get("MIN_FULLTEXT_LENGTH", "300"))
 
-
-def fetch_article_full_text(article_url):
-    """
-    【v4.0 二级抓取】解析单篇文章 URL，抽取正文。
-    用于 RSS/NewsAPI 线索的深度补全 —— 把"标题+一句话摘要"升级为"原文全文"。
-
-    优先级：
-      1. <article> / <main> 语义标签
-      2. 常见 CMS 正文选择器（.post-content, .article-body, .entry-content, .content-body）
-      3. 兜底：所有 <p> 文本拼接
-
-    返回 (full_text | None, depth: "full" | "shallow")
-      - full_text 长度 ≥ MIN_FULLTEXT_LENGTH → ("...", "full")
-      - 抓取失败或过短 → (None, "shallow")
-    """
-    if not article_url or not article_url.startswith("http"):
-        return None, "shallow"
-
-    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-    try:
-        res = requests.get(article_url, headers=headers, timeout=10, verify=False, allow_redirects=True)
-        res.raise_for_status()
-        soup = BeautifulSoup(res.text, 'html.parser')
-
-        # 剥离噪声标签
-        for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "iframe"]):
-            tag.extract()
-
-        # 优先级 1-2：语义标签 + 常见 CMS 正文选择器
-        candidates = [
-            soup.find('article'),
-            soup.find('main'),
-            soup.select_one('.post-content'),
-            soup.select_one('.article-body'),
-            soup.select_one('.article-content'),
-            soup.select_one('.entry-content'),
-            soup.select_one('.content-body'),
-            soup.select_one('.news-content'),
-            soup.select_one('[role="main"]'),
-        ]
-        target = next((c for c in candidates if c and len(c.get_text(strip=True)) >= MIN_FULLTEXT_LENGTH), None)
-
-        if target:
-            text = target.get_text(separator="\n", strip=True)
-        else:
-            # 优先级 3：兜底拼所有 <p>
-            paragraphs = soup.find_all('p')
-            text = "\n".join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
-
-        if len(text) >= MIN_FULLTEXT_LENGTH:
-            return text, "full"
-        # 过短 —— 可能是 paywall / JS 渲染 / 登录墙，如实降级
-        return None, "shallow"
-    except Exception as e:
-        logger.warning(f"   ⚠️ [二级抓取] 正文解析失败 [{article_url[:60]}...]: {str(e)[:80]}")
-        return None, "shallow"
 
 def _parse_rss_date(pub_date_str):
     """解析 RSS <pubDate>（RFC 822 格式），返回 timezone-aware datetime；失败返回 None"""
@@ -542,7 +471,8 @@ def fetch_and_parse_rss(url, limit=3):
             if item_link:
                 item_link = resolve_google_news_url(item_link)
                 links.append(item_link)
-                full_text, item_depth = fetch_article_full_text(item_link)
+                full_text = extract_article_body(item_link, min_length=MIN_FULLTEXT_LENGTH, max_length=4000)
+                item_depth = "full" if full_text else "shallow"
                 if full_text:
                     # 截断超长正文，控制 token 成本
                     full_text_trimmed = full_text[:4000]
@@ -607,8 +537,8 @@ def _fetch_newsapi_single_lang(query, days_back, lang, api_key):
             art_url = resolve_google_news_url(art.get("url", ""))
             if idx == 0:
                 first_url = art_url
-                # v4.0: 头条线索二级抓取补全正文
-                full_text, item_depth = fetch_article_full_text(art_url)
+                full_text = extract_article_body(art_url, min_length=MIN_FULLTEXT_LENGTH, max_length=4000)
+                item_depth = "full" if full_text else "shallow"
                 if full_text:
                     full_text_trimmed = full_text[:4000]
                     combined.append(
@@ -750,6 +680,17 @@ def generate_queries_from_matrix(matrix_config, max_keywords_per_query=8):
 # v5.0: 统一缓存客户端（替代原始 OpenAI Client）
 # 内置进程内存去重 + 磁盘缓存，提升 DeepSeek API 缓存命中率
 _llm_client = None
+_notion_sink = None
+
+
+def _get_notion_sink():
+    """获取全局 NotionSink 单例，基于 radar_infra.sink"""
+    global _notion_sink
+    if _notion_sink is None:
+        token = os.environ.get("NOTION_TOKEN")
+        db_id = os.environ.get("NOTION_DATABASE_ID")
+        _notion_sink = NotionSink(token=token, database_id=db_id)
+    return _notion_sink
 
 def _get_llm_client():
     """获取全局 CachedLLMClient 单例，基于 radar_infra.llm"""
@@ -788,7 +729,7 @@ def discover_hotspots(max_count=5):
             temperature=0.7,
         )
         if content:
-            data = json.loads(content)
+            data = safe_json_parse(content)
             queries = data.get("queries", []) if isinstance(data, dict) else []
             return [q for q in queries[:max_count] if isinstance(q, str) and len(q) > 5]
     except Exception as e:
@@ -948,7 +889,7 @@ def extract_macro_policy(raw_text, schema_dict, baseline_injection="", baseline_
         if content is None:
             logger.error("DeepSeek 返回了空内容")
             return None
-        result = json.loads(content)
+        result = safe_json_parse(content)
         return _normalize_v50(result)
     except Exception as e:
         logger.error(f"DeepSeek 提炼异常: {str(e)}")
@@ -1180,48 +1121,6 @@ def _validate_and_sanitize_future_dates(data):
 #  在入库前查询同政策名是否已存在，避免重复创建
 # =============================================================================
 
-def _clean_chinese_title_noise(s: str) -> str:
-    """v5.5: 清理中文标题中的常见政策名词噪音，返回核心名词。"""
-    if not s:
-        return ""
-    s = re.sub(r'^(关于印发|关于公布|关于关于|关于|印发|关于实施|实施|推进)+', '', s)
-    s = re.sub(r'(相关法规|实施细则|暂行规定|管理办法|暂行办法|指导意见|管理条例|实施条例|规定|条例|法案|政策|标准|规范|办法|通知|公告|的通知|的公告)+$', '', s)
-    return s.strip()
-
-
-def _clean_title_noise(title: str) -> str:
-    """
-    v5.5: 清除政策/法案名中的冗余官方指令前缀（如 Regulation (EU) 2024/... 或 Peraturan Menteri ...）。
-    返回核心法案名称。
-    """
-    if not title:
-        return ""
-    cleaned = title.strip()
-    # 欧盟法规前缀去除
-    cleaned = re.sub(
-        r'^(?:Regulation|Directive|Decision)\s*\(EU\)\s*(?:No\s*)?\d+/\d+(?:\s+of\s+the\s+European\s+Parliament\s+and\s+of\s+the\s+Council)?(?:\s+establishing\s+a\s+framework\s+for|\s+on)?',
-        '',
-        cleaned,
-        flags=re.IGNORECASE
-    )
-    # 印尼法规前缀去除
-    cleaned = re.sub(
-        r'^(?:Peraturan\s+Menteri|Peraturan\s+Pemerintah|Keputusan\s+Menteri|Undang-Undang)\s+.*?Nomor\s+\d+\s+Tahun\s+\d+(?:\s+tentang)?',
-        '',
-        cleaned,
-        flags=re.IGNORECASE
-    )
-    # 其它常见行政前缀去除
-    cleaned = re.sub(
-        r'^(?:Decree|Order|Act)\s*(?:No\.?)?\s*\d+(?:\s+of\s+\d{4})?',
-        '',
-        cleaned,
-        flags=re.IGNORECASE
-    )
-    cleaned = cleaned.strip()
-    return cleaned if cleaned else title.strip()
-
-
 def _calculate_title_similarity(s1, s2):
     """
     v5.5: 语义相似度校验：计算两个政策标题的重合度，并应用年份/缩写防误判规则。
@@ -1265,8 +1164,8 @@ def _calculate_title_similarity(s1, s2):
     has_zh2 = any('\u4e00' <= char <= '\u9fff' for char in s2)
 
     if has_zh1 or has_zh2:
-        s1_clean = _clean_chinese_title_noise(s1.lower().replace(" ", ""))
-        s2_clean = _clean_chinese_title_noise(s2.lower().replace(" ", ""))
+        s1_clean = clean_chinese_title_noise(s1.lower().replace(" ", ""))
+        s2_clean = clean_chinese_title_noise(s2.lower().replace(" ", ""))
         if not s1_clean or not s2_clean:
             return False
         set1 = set(s1_clean)
@@ -1276,12 +1175,6 @@ def _calculate_title_similarity(s1, s2):
         jaccard_ratio = len(common) / len(set1.union(set2)) if len(set1.union(set2)) > 0 else 0.0
         return overlap_ratio >= 0.85 or jaccard_ratio >= 0.65
     else:
-        def get_tokens(s):
-            s_clean = re.sub(r'[^\w\s]', ' ', s.lower())
-            words = [w for w in s_clean.split() if w]
-            stop_words = {"of", "on", "the", "for", "a", "an", "to", "in", "and", "or", "by", "with", "about"}
-            return set(w for w in words if w not in stop_words and len(w) > 1)
-
         set1 = get_tokens(s1)
         set2 = get_tokens(s2)
         if not set1 or not set2:
@@ -1297,18 +1190,11 @@ def _notion_search_pages(official_name, fallback_name=""):
     v5.5: official_name 与 fallback_name 的 Notion 去重查找。
     结合清洗核心前缀、英文缩写、括号简称、及国家-矿种AND逻辑构造多重检索，并用 Python 级相似度校验双重防重。
     """
-    notion_token = os.environ.get("NOTION_TOKEN")
-    database_id = os.environ.get("NOTION_DATABASE_ID")
-    if not notion_token or not database_id or notion_token == "disabled":
+    sink = _get_notion_sink()
+    if sink._token == "disabled" or not sink._token:
         return False, None
 
-    url = f"https://api.notion.com/v1/databases/{database_id}/query"
-    headers = {
-        "Authorization": f"Bearer {notion_token}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
-
+    url = f"https://api.notion.com/v1/databases/{sink._db_id}/query"
     payload = {"filter": {"or": []}, "page_size": 25}
     target_name = (official_name or fallback_name or "").strip()
     if not target_name:
@@ -1339,12 +1225,12 @@ def _notion_search_pages(official_name, fallback_name=""):
             prefixes.append(part)
 
     # 核心前缀提取
-    cleaned = _clean_title_noise(target_name)
+    cleaned = clean_title_noise(target_name)
     cleaned_no_paren = re.sub(r'[（\(].*?[）\)]', '', cleaned).strip()
     normalized = cleaned_no_paren.replace("政策", "").replace("条例", "").replace("法案", "").replace("体系", "").replace("（现行政策）", "").strip()
     
     if any('\u4e00' <= char <= '\u9fff' for char in normalized):
-        cn_core = _clean_chinese_title_noise(normalized)
+        cn_core = clean_chinese_title_noise(normalized)
         if len(cn_core) >= 3:
             prefixes.append(cn_core[:5])
         elif len(normalized) >= 3:
@@ -1385,7 +1271,7 @@ def _notion_search_pages(official_name, fallback_name=""):
             })
 
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        res = sink.api_request("POST", url, json=payload)
         if res.status_code == 200:
             results = res.json().get("results", [])
             for page in results:
@@ -1409,18 +1295,12 @@ def _notion_search_pages(official_name, fallback_name=""):
 
 def _notion_search_by_rich_text(property_name: str, value: str):
     """按 Notion rich_text 属性精确查重，主要用于 document_signature 兜底。"""
-    notion_token = os.environ.get("NOTION_TOKEN")
-    database_id = os.environ.get("NOTION_DATABASE_ID")
+    sink = _get_notion_sink()
     target_value = (value or "").strip()
-    if not notion_token or not database_id or notion_token == "disabled" or not target_value:
+    if sink._token == "disabled" or not sink._token or not target_value:
         return False, None
 
-    url = f"https://api.notion.com/v1/databases/{database_id}/query"
-    headers = {
-        "Authorization": f"Bearer {notion_token}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
+    url = f"https://api.notion.com/v1/databases/{sink._db_id}/query"
     payload = {
         "filter": {
             "property": property_name,
@@ -1430,7 +1310,7 @@ def _notion_search_by_rich_text(property_name: str, value: str):
     }
 
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        res = sink.api_request("POST", url, json=payload)
         if res.status_code == 200:
             results = res.json().get("results", [])
             if results:
@@ -1444,18 +1324,12 @@ def _notion_search_by_rich_text(property_name: str, value: str):
 
 def _notion_search_by_url(property_name: str, value: str):
     """v5.5: 按 Notion url 属性精确查重，主要用于原文链接查重。"""
-    notion_token = os.environ.get("NOTION_TOKEN")
-    database_id = os.environ.get("NOTION_DATABASE_ID")
+    sink = _get_notion_sink()
     target_value = (value or "").strip()
-    if not notion_token or not database_id or notion_token == "disabled" or not target_value:
+    if sink._token == "disabled" or not sink._token or not target_value:
         return False, None
 
-    url = f"https://api.notion.com/v1/databases/{database_id}/query"
-    headers = {
-        "Authorization": f"Bearer {notion_token}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
+    url = f"https://api.notion.com/v1/databases/{sink._db_id}/query"
     payload = {
         "filter": {
             "property": property_name,
@@ -1465,7 +1339,7 @@ def _notion_search_by_url(property_name: str, value: str):
     }
 
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        res = sink.api_request("POST", url, json=payload)
         if res.status_code == 200:
             results = res.json().get("results", [])
             if results:
@@ -1482,16 +1356,11 @@ def _notion_update_policy(page_id, data, source_url):
     对已有政策执行增量更新：更新当前阶段、条款摘要、冲击烈度、分析结论。
     保留原有的创建时间和政策名称。
     """
-    notion_token = os.environ.get("NOTION_TOKEN")
-    if not notion_token or notion_token == "disabled":
+    sink = _get_notion_sink()
+    if sink._token == "disabled" or not sink._token:
         return False
 
     url = f"https://api.notion.com/v1/pages/{page_id}"
-    headers = {
-        "Authorization": f"Bearer {notion_token}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
 
     pd = data["policy_dynamics"]
     si = data["strategic_implications"]
@@ -1579,7 +1448,7 @@ def _notion_update_policy(page_id, data, source_url):
     payload = {"properties": properties}
 
     try:
-        res = requests.patch(url, headers=headers, json=payload, timeout=10)
+        res = sink.api_request("PATCH", url, json=payload)
         if res.status_code == 200:
             logger.info("🔄 [Notion] 检测到重复政策，已执行增量更新（阶段/条款/烈度）。")
             return True
@@ -1592,7 +1461,7 @@ def _notion_update_policy(page_id, data, source_url):
             if missing_props:
                 stripped = {k: v for k, v in properties.items() if k not in missing_props}
                 payload["properties"] = stripped
-                res2 = requests.patch(url, headers=headers, json=payload, timeout=10)
+                res2 = sink.api_request("PATCH", url, json=payload)
                 if res2.status_code == 200:
                     logger.info("🔄 [Notion] 检测到重复政策，已执行增量更新（自动跳过数据库缺失字段）。")
                     return True
@@ -1611,8 +1480,8 @@ def _notion_append_news(page_id, data, source_url, article_type):
     v4.5: 新闻报道/分析评论 → 追加到已有政策文件下，不创建新记录。
     更新：关联报道数 +1、最后报道日期、在页面 body 追加折叠引用块。
     """
-    notion_token = os.environ.get("NOTION_TOKEN")
-    if not notion_token or notion_token == "disabled":
+    sink = _get_notion_sink()
+    if sink._token == "disabled" or not sink._token:
         return False
 
     pd = data.get("policy_dynamics", {})
@@ -1626,17 +1495,10 @@ def _notion_append_news(page_id, data, source_url, article_type):
     summary_text = str(pd.get("substantive_provisions", "") or si.get("impact_deduction", ""))[:300]
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    # 更新属性：关联报道数递增、最后报道日期
-    headers = {
-        "Authorization": f"Bearer {notion_token}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28",
-    }
-
     # 先读取当前计数
+    current_count = 0
     try:
-        r = requests.get(f"https://api.notion.com/v1/pages/{page_id}", headers=headers, timeout=10)
-        current_count = 0
+        r = sink.api_request("GET", f"https://api.notion.com/v1/pages/{page_id}")
         if r.status_code == 200:
             num_prop = r.json().get("properties", {}).get("关联报道数", {})
             current_count = num_prop.get("number", 0) or 0
@@ -1675,11 +1537,11 @@ def _notion_append_news(page_id, data, source_url, article_type):
     try:
         # 1. 更新页面属性
         url_properties = f"https://api.notion.com/v1/pages/{page_id}"
-        res_prop = requests.patch(url_properties, headers=headers, json={"properties": props_update}, timeout=10)
+        res_prop = sink.api_request("PATCH", url_properties, json={"properties": props_update})
 
         # 2. 追加内容到页面正文
         url_children = f"https://api.notion.com/v1/blocks/{page_id}/children"
-        res_child = requests.patch(url_children, headers=headers, json={"children": children}, timeout=10)
+        res_child = sink.api_request("PATCH", url_children, json={"children": children})
 
         if res_prop.status_code == 200 and res_child.status_code == 200:
             logger.info(f"📎 [Notion] 已追加{article_label}到已有文件并更新属性（关联报道数: {current_count + 1}）")
@@ -1701,23 +1563,14 @@ def _semantic_diff(page_id, new_data):
     调用 LLM 判定：纯粹复述已知信息（MUTE）还是包含实质新进展（ALERT）。
     返回 {"has_material_change": bool, "change_summary": str}
     """
-    notion_token = os.environ.get("NOTION_TOKEN")
-    if not notion_token or notion_token == "disabled":
+    sink = _get_notion_sink()
+    if sink._token == "disabled" or not sink._token:
         return {"has_material_change": False, "change_summary": ""}
-
-    headers = {
-        "Authorization": f"Bearer {notion_token}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28",
-    }
 
     # 读取已有页面的核心摘要
     old_summary = ""
     try:
-        r = requests.get(
-            f"https://api.notion.com/v1/pages/{page_id}",
-            headers=headers, timeout=10
-        )
+        r = sink.api_request("GET", f"https://api.notion.com/v1/pages/{page_id}")
         if r.status_code == 200:
             props = r.json().get("properties", {})
             provisions = props.get("核心条款摘要", {}).get("rich_text", [])
@@ -1775,7 +1628,7 @@ def _semantic_diff(page_id, new_data):
             temperature=0.0,
         )
         if content:
-            result = json.loads(content)
+            result = safe_json_parse(content)
             return {
                 "has_material_change": result.get("has_material_change", False),
                 "change_summary": result.get("change_summary", ""),
@@ -1792,9 +1645,8 @@ def _sync_baselines_to_notion(yaml_path):
     已有的跳过，不存在的创建基础容器。
     返回创建的条目数。
     """
-    notion_token = os.environ.get("NOTION_TOKEN")
-    database_id = os.environ.get("NOTION_DATABASE_ID")
-    if not notion_token or not database_id or notion_token == "disabled":
+    sink = _get_notion_sink()
+    if sink._token == "disabled" or not sink._token:
         return 0
 
     if not os.path.isfile(yaml_path):
@@ -1805,12 +1657,6 @@ def _sync_baselines_to_notion(yaml_path):
             config = yaml.safe_load(f) or {}
     except Exception:
         return 0
-
-    headers = {
-        "Authorization": f"Bearer {notion_token}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28",
-    }
 
     doc_type_map = {
         "Law": "法律 Law", "Regulation": "法规 Regulation",
@@ -1904,16 +1750,17 @@ def _sync_baselines_to_notion(yaml_path):
                 properties["要点摘要"] = {"rich_text": [{"text": {"content": f"{doc['chinese_name']} ({official_name[:50]})"}}]}
 
             payload = {
-                "parent": {"database_id": database_id},
+                "parent": {"database_id": sink._db_id},
                 "properties": properties,
             }
 
             try:
-                res = requests.post(
+                res = sink.api_request(
+                    "POST",
                     "https://api.notion.com/v1/pages",
-                    headers=headers, json=payload, timeout=10
+                    json=payload
                 )
-                if res.status_code == 200:
+                if res.status_code in (200, 201):
                     logger.info(f"  🌱 [基线种子] {doc.get('short_name', official_name[:50])}")
                     created += 1
                 else:
@@ -2494,7 +2341,7 @@ def insert_to_notion(data, source_url):
     }
 
     try:
-        res_page_id = _notion_api_post(url, headers, payload)
+        res_page_id = _notion_api_post(url, payload)
         if res_page_id:
             return {"is_new": True, "page_id": res_page_id}
         return {"is_new": False, "page_id": None}
@@ -2503,17 +2350,26 @@ def insert_to_notion(data, source_url):
         return {"is_new": False, "page_id": None}
 
 
-def _notion_api_post(url, headers, payload, retry_stripping=True):
-    """发送 Notion API 请求，自动处理字段缺失错误并重试"""
+def _notion_api_post(url, payload, retry_stripping=True):
+    """发送 Notion API 请求，自动处理字段缺失错误并重试（基于 NotionSink.api_request）"""
     import re
-    res = requests.post(url, headers=headers, json=payload, timeout=10)
-    if res.status_code == 200:
-        logger.info("🚀 [Notion] 成功打标并持久化沉淀至高管数据库看板。")
-        return res.json().get("id", "")
+    sink = _get_notion_sink()
+    try:
+        res = sink.api_request("POST", url, json=payload)
+        if res.status_code in (200, 201):
+            logger.info("🚀 [Notion] 成功打标并持久化沉淀至高管数据库看板。")
+            return res.json().get("id", "")
+        err_text = res.text[:500]
+        status_code = res.status_code
+    except NotionAPIError as exc:
+        status_code = exc.status_code
+        err_text = exc.response_text
+    except Exception as exc:
+        logger.warning(f"⚠️ [Notion] 写入发生异常: {exc}")
+        return False
 
-    err_text = res.text[:500]
     # v4.3: 若 Notion 数据库缺少某些属性列，自动剔除后重试
-    if retry_stripping and res.status_code == 400 and "is not a property that exists" in err_text:
+    if retry_stripping and status_code == 400 and "is not a property that exists" in err_text:
         missing_props = set(re.findall(r'([^\s."]+) is not a property that exists', err_text))
         if missing_props:
             stripped = {}
@@ -2531,9 +2387,9 @@ def _notion_api_post(url, headers, payload, retry_stripping=True):
                     if b.get("type") != "heading_2" or "产业基线" not in str(b.get("heading_2", {}).get("rich_text", [{}])[0].get("text", {}).get("content", ""))
                 ]
             logger.warning(f"⚠️ [Notion] 数据库缺少字段: {', '.join(removed)}，已自动移除后重试。")
-            return _notion_api_post(url, headers, payload, retry_stripping=False)
+            return _notion_api_post(url, payload, retry_stripping=False)
 
-    logger.warning(f"⚠️ [Notion] 写入失败，状态码: {res.status_code}, 详情: {err_text}")
+    logger.warning(f"⚠️ [Notion] 写入失败，状态码: {status_code}, 详情: {err_text}")
     return False
 
 
@@ -2857,7 +2713,7 @@ if __name__ == "__main__":
             else:
                 fetched_text = None
         else:
-            fetched_text = fetch_and_clean_html(source["url"], source["dom_selector"])
+            fetched_text = fetch_html(source["url"], selector=source["dom_selector"])
             if fetched_text:
                 source_depth = "full"  # HTML 靶向抓取本身是全文
 

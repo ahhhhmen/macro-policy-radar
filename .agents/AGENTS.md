@@ -6,7 +6,7 @@ This document defines the core domain rules and logic constraints for this speci
 
 ## 1. Project Positioning & Architecture
 - 全球关键矿产宏观地缘政策情报引擎，自动化采集→分析→过滤→推送流水线。
-- 单文件主引擎 `main.py`（1743 行），管道式无状态设计。
+- 单文件主引擎 `main.py`（基于 `radar-infra` 共享基础设施深度重构瘦身），管道式无状态设计。
 - 配置全外置：`sources.yaml`（情报源）、`policy_schema.json`（LLM Schema）、`knowledge_baselines.yaml`（基线库，v3.0 起采用 documents 结构化列表，且影子审计脚本 audit_baselines.py 已适配此结构）、`.env`（凭证）。
 - 五道防线：杀伤开关→关键词噪音→旧规拦截→时效校验→数字捏造净化。
 - GitHub Actions 每周一 09:00 CST 自动运行。
@@ -14,16 +14,16 @@ This document defines the core domain rules and logic constraints for this speci
 ## 2. Tech Stack & Conventions
 - Python 3.10+，函数式管道风格。
 - Type hints 强制、logging 替代 print、pathlib 优先。
-- OpenAI SDK（DeepSeek 兼容接口）+ BeautifulSoup4 + lxml + diskcache 三层缓存（内存→磁盘→API）。
+- OpenAI SDK（DeepSeek 兼容接口）+ BeautifulSoup4 + lxml + diskcache 三层缓存（与 `radar-infra` 底层协作）。
 - 全局常量：大写蛇形 `MAX_AI_CALLS`；函数：小写蛇形，私有函数下划线前缀 `_should_push()`；映射字典：大写蛇形 `_COUNTRY_ZH_MAP`。
-- 版本变更在注释中以 `v4.0`、`v5.0` 格式标注。
+- 版本变更在注释中以 `v4.0`、`v5.0`、`v6.0` 格式标注。
 
 ## 3. Domain Logic & Data Filters (领域业务与过滤规则)
 - `event_update.event_classification == Routine_Commentary` 时必须静默入库，不得被 `supply_chain_impact_level` 覆盖为钉钉推送。
 - `news_recency_verification.dingtalk_alert_required == false` 时必须视为硬闸门，禁止推送。
 - `_numbers_flagged > 0` 时必须进入人工复核，不得直接推送。
 - `semantic_diff.has_material_change == false` 时保持静默，即使旧文件的烈度字段为高，也不能升级为告警。
-- Notion 去重遵循 v5.5 规范：首道防线使用 `原文链接` 精确过滤 URL，第二道防线使用 `policy_entity.official_name` 核心清洗后模糊检索，第三道防线使用 `document_signature` 兜底；相似度计算针对英文采用单词词组级 Jaccard (>=0.60) 与 Overlap (>=0.85)，并支持括号内简称/全称的递归比对，防止因行政前缀噪声/翻译错位/简称变体引起重复建档。
+- Notion 去重与 API 通信底层：全面调用新版 `NotionSink` 单例，所有的 Notion 查询/新建/PATCH 动作收敛于 `sink.api_request()`。Notion 去重遵循 v5.5 规范：首道防线使用 `原文链接` 精确过滤 URL，第二道防线使用 `policy_entity.official_name` 核心清洗后模糊检索，第三道防线使用 `document_signature` 兜底；相似度计算针对英文采用单词词组级 Jaccard (>=0.60) 与 Overlap (>=0.85)，并支持括号内简称/全称的递归比对，防止因行政前缀噪声/翻译错位/简称变体引起重复建档。
 - 钉钉输出不得包含 `⚠️` 这类模型自检标记；复核标记仅保留在 Notion 内部字段。
 - 钉钉推送采用 v5.6 智能简报格式：将监测动态按锂、钴、镍、其它关键金属进行分组排版，重磅警告展示完整三层研判，常规动态以紧凑列表合并展现，保障信息完备度。
 - v5.7 监控网拓宽：宏观雷达不仅追踪 10 种特定关键金属，亦涵盖以循环经济、再生回收目标（如再生塑料/钢/铝/镁回收门槛、EPR 生产者延伸责任、报废车辆 ELV 追溯）为切入点且辐射关键原材料供应链的跨行业上位法案。寻源矩阵需在 `policy_keywords` 中涵盖相关回收合规术语，且在 `broad_minerals` 兜底中包含 "critical raw materials" 和 "critical materials" 等概念伞。

@@ -8,6 +8,12 @@ import os
 import re
 import requests
 from dotenv import load_dotenv
+from radar_infra.guard import (
+    clean_chinese_title_noise,
+    clean_title_noise,
+    get_tokens,
+    calculate_title_similarity,
+)
 
 load_dotenv()
 
@@ -72,48 +78,6 @@ def get_chinese_name(page):
     return get_text_from_rich_text(cn_prop).strip()
 
 
-def _clean_chinese_title_noise(s: str) -> str:
-    """v5.5: 清理中文标题中的常见政策名词噪音，返回核心名词。"""
-    if not s:
-        return ""
-    s = re.sub(r'^(关于印发|关于公布|关于关于|关于|印发|关于实施|实施|推进)+', '', s)
-    s = re.sub(r'(相关法规|实施细则|暂行规定|管理办法|暂行办法|指导意见|管理条例|实施条例|规定|条例|法案|政策|标准|规范|办法|通知|公告|的通知|的公告)+$', '', s)
-    return s.strip()
-
-
-def _clean_title_noise(title: str) -> str:
-    """
-    v5.5: 清除政策/法案名中的冗余官方指令前缀（如 Regulation (EU) 2024/... 或 Peraturan Menteri ...）。
-    返回核心法案名称。
-    """
-    if not title:
-        return ""
-    cleaned = title.strip()
-    # 欧盟法规前缀去除
-    cleaned = re.sub(
-        r'^(?:Regulation|Directive|Decision)\s*\(EU\)\s*(?:No\s*)?\d+/\d+(?:\s+of\s+the\s+European\s+Parliament\s+and\s+of\s+the\s+Council)?(?:\s+establishing\s+a\s+framework\s+for|\s+on)?',
-        '',
-        cleaned,
-        flags=re.IGNORECASE
-    )
-    # 印尼法规前缀去除
-    cleaned = re.sub(
-        r'^(?:Peraturan\s+Menteri|Peraturan\s+Pemerintah|Keputusan\s+Menteri|Undang-Undang)\s+.*?Nomor\s+\d+\s+Tahun\s+\d+(?:\s+tentang)?',
-        '',
-        cleaned,
-        flags=re.IGNORECASE
-    )
-    # 其它常见行政前缀去除
-    cleaned = re.sub(
-        r'^(?:Decree|Order|Act)\s*(?:No\.?)?\s*\d+(?:\s+of\s+\d{4})?',
-        '',
-        cleaned,
-        flags=re.IGNORECASE
-    )
-    cleaned = cleaned.strip()
-    return cleaned if cleaned else title.strip()
-
-
 def _calculate_title_similarity(s1, s2):
     """
     v5.5: 语义相似度校验：计算两个政策标题的重合度，并应用年份/缩写防误判规则。
@@ -157,8 +121,8 @@ def _calculate_title_similarity(s1, s2):
     has_zh2 = any('\u4e00' <= char <= '\u9fff' for char in s2)
 
     if has_zh1 or has_zh2:
-        s1_clean = _clean_chinese_title_noise(s1.lower().replace(" ", ""))
-        s2_clean = _clean_chinese_title_noise(s2.lower().replace(" ", ""))
+        s1_clean = clean_chinese_title_noise(s1.lower().replace(" ", ""))
+        s2_clean = clean_chinese_title_noise(s2.lower().replace(" ", ""))
         if not s1_clean or not s2_clean:
             return False
         set1 = set(s1_clean)
@@ -168,12 +132,6 @@ def _calculate_title_similarity(s1, s2):
         jaccard_ratio = len(common) / len(set1.union(set2)) if len(set1.union(set2)) > 0 else 0.0
         return overlap_ratio >= 0.85 or jaccard_ratio >= 0.65
     else:
-        def get_tokens(s):
-            s_clean = re.sub(r'[^\w\s]', ' ', s.lower())
-            words = [w for w in s_clean.split() if w]
-            stop_words = {"of", "on", "the", "for", "a", "an", "to", "in", "and", "or", "by", "with", "about"}
-            return set(w for w in words if w not in stop_words and len(w) > 1)
-
         set1 = get_tokens(s1)
         set2 = get_tokens(s2)
         if not set1 or not set2:
@@ -346,7 +304,7 @@ def main():
         
         # 英文前缀聚类
         if title:
-            cleaned_en = _clean_title_noise(title)
+            cleaned_en = clean_title_noise(title)
             normalized_en = re.sub(r'[（\(].*?[）\)]', '', cleaned_en).strip()
             words = normalized_en.split()
             if len(words) >= 3:
@@ -358,7 +316,7 @@ def main():
         # 中文前缀聚类
         if cn_name:
             normalized_cn = cn_name.replace("政策", "").replace("条例", "").replace("法案", "").replace("体系", "").replace("（现行政策）", "").strip()
-            cn_core = _clean_chinese_title_noise(normalized_cn)
+            cn_core = clean_chinese_title_noise(normalized_cn)
             if len(cn_core) >= 3:
                 cn_prefix = cn_core[:5]
                 prefix_groups.setdefault(cn_prefix, []).append(page)

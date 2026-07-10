@@ -12,6 +12,7 @@ def _install_radar_infra_stubs():
     guard = types.ModuleType("radar_infra.guard")
     sink = types.ModuleType("radar_infra.sink")
     support = types.ModuleType("radar_infra.support")
+    fetch = types.ModuleType("radar_infra.fetch")
 
     class DeepSeekProvider:
         pass
@@ -32,6 +33,13 @@ def _install_radar_infra_stubs():
     def sanitize_numbers(text, fetched_text):
         return text, 0
 
+    import json
+    def safe_json_parse(raw):
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
     def send_dingtalk(*args, **kwargs):
         return None
 
@@ -51,19 +59,61 @@ def _install_radar_infra_stubs():
     def setup_logging(name):
         return _Logger()
 
+    def fetch_html(url, selector=None, **kwargs):
+        return "Mocked HTML Content"
+
+    def extract_article_body(url, **kwargs):
+        return "Mocked Article Body Content"
+
+    def clean_chinese_title_noise(s):
+        return s
+
+    def clean_title_noise(s):
+        return s
+
+    def get_tokens(s):
+        return set(s.split())
+
+    def calculate_title_similarity(s1, s2):
+        return 1.0
+
+    class NotionSink:
+        def __init__(self, token=None, database_id=None):
+            self._token = token or "mock_token"
+            self._db_id = database_id or "mock_db"
+        def api_request(self, method, url, **kwargs):
+            import requests
+            return requests.request(method, url, **kwargs)
+
+    class NotionAPIError(Exception):
+        def __init__(self, status_code, message, response_text=""):
+            self.status_code = status_code
+            self.message = message
+            self.response_text = response_text
+
     llm.DeepSeekProvider = DeepSeekProvider
     llm.CachedLLMClient = CachedLLMClient
     llm.create_llm_retry_decorator = create_llm_retry_decorator
     guard.CircuitBreaker = CircuitBreaker
     guard.sanitize_numbers = sanitize_numbers
+    guard.safe_json_parse = safe_json_parse
+    guard.clean_chinese_title_noise = clean_chinese_title_noise
+    guard.clean_title_noise = clean_title_noise
+    guard.get_tokens = get_tokens
+    guard.calculate_title_similarity = calculate_title_similarity
     sink.send_dingtalk = send_dingtalk
+    sink.NotionSink = NotionSink
+    sink.NotionAPIError = NotionAPIError
     support.setup_logging = setup_logging
+    fetch.fetch_html = fetch_html
+    fetch.extract_article_body = extract_article_body
 
     sys.modules["radar_infra"] = radar_infra
     sys.modules["radar_infra.llm"] = llm
     sys.modules["radar_infra.guard"] = guard
     sys.modules["radar_infra.sink"] = sink
     sys.modules["radar_infra.support"] = support
+    sys.modules["radar_infra.fetch"] = fetch
 
 
 _install_radar_infra_stubs()
@@ -148,12 +198,12 @@ class NotionSignatureDedupeTests(unittest.TestCase):
             json=lambda: {"results": [{"id": "page-1"}]},
         )
 
-        with patch.object(main.requests, "post", return_value=response) as post:
+        with patch("requests.request", return_value=response) as req:
             exists, page_id = main._notion_search_by_rich_text("文件签名", "CN-rare-earth-doc")
 
         self.assertTrue(exists)
         self.assertEqual(page_id, "page-1")
-        payload = post.call_args.kwargs["json"]
+        payload = req.call_args.kwargs["json"]
         self.assertEqual(payload["filter"]["property"], "文件签名")
         self.assertEqual(payload["filter"]["rich_text"]["equals"], "CN-rare-earth-doc")
 

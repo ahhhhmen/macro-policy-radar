@@ -166,6 +166,11 @@ def log_discovered_source(source_url: str, policy_data: dict, configured_domains
     if not source_url or not source_url.startswith("http"):
         return None
 
+    # v5.8: 只有官方公告类别，才可被视为官方来源并记入寻源列表
+    article_type = policy_data.get("news_recency_verification", {}).get("article_type")
+    if article_type != "Official_Announcement":
+        return None
+
     try:
         parsed_url = urllib.parse.urlparse(source_url)
         domain = parsed_url.netloc.lower()
@@ -987,7 +992,7 @@ def _has_regulation_reference(text):
 def _should_push(data, fetched_text="", source_depth="shallow", is_new_document=True):
     """
     【v4.5 文档生命周期驱动推送】以政策文件为推送单元，而非新闻报道。
-    返回 (should_push: bool, reason: str)
+    返回 (Action: str, reason: str)，Action 可选 "ALERT", "ROUTINE", "MUTE"
 
     推送触发条件（满足任一即可）：
       - 新文件出台：article_type=Official_Announcement 且为新文件
@@ -1012,42 +1017,42 @@ def _should_push(data, fetched_text="", source_depth="shallow", is_new_document=
 
     # 硬性不推（始终保留的底线）
     if stage == "Procedural_Statement":
-        return False, "程序性说明，仅入库"
+        return "MUTE", "程序性说明，仅入库"
     if stage == "Unverified":
-        return False, "阶段未核实，仅入库"
+        return "MUTE", "阶段未核实，仅入库"
     if confidence == "Low":
-        return False, f"置信度 Low，仅入库待复核"
+        return "MUTE", f"置信度 Low，仅入库待复核"
     if data.get("_numbers_flagged", 0) > 0:
-        return False, "数字净化命中，需人工核实后再推送"
+        return "MUTE", "数字净化命中，需人工核实后再推送"
     if notion_gate is False:
-        return False, "LLM 推送闸门判定为不推送"
+        return "MUTE", "LLM 推送闸门判定为不推送"
     if ec == "Routine_Commentary":
-        return False, f"常规动态（{event.get('event_summary', '')[:40]}），绝对静默"
+        return "MUTE", f"常规动态（{event.get('event_summary', '')[:40]}），绝对静默"
     if isinstance(material_change, dict) and not material_change.get("has_material_change"):
-        return False, "语义Diff无实质新信息，静默入库"
+        return "MUTE", "语义Diff无实质新信息，静默入库"
 
     # 新文件出台 → 推送（最高优先级）
     if article_type == "Official_Announcement" and is_new_document:
-        return True, f"新文件出台：{pd.get('policy_name_zh', '')[:40]}"
+        return "ALERT", f"新文件出台：{pd.get('policy_name_zh', '')[:40]}"
 
     # v5.1 第一层：event_classification 三分类（零额外 API 调用）
     if ec in ("New_Policy_Issuance", "Milestone_Amendment"):
         label = "新政策出台" if ec == "New_Policy_Issuance" else "既有文件里程碑变更"
-        return True, f"{label}：{event.get('event_summary', '')[:60]}"
+        return "ALERT", f"{label}：{event.get('event_summary', '')[:60]}"
 
     # 语义 Diff 检测到质变 → 推送（兜底纠错）
     if isinstance(material_change, dict) and material_change.get("has_material_change"):
-        return True, f"语义Diff检测到质变：{material_change.get('change_summary', '')[:60]}"
+        return "ALERT", f"语义Diff检测到质变：{material_change.get('change_summary', '')[:60]}"
 
     # 既有文件，高冲击或高置信分析 → 推送
     if impact in ("High_Disruption", "Moderate_Adjustment"):
-        return True, f"重大更新（烈度={impact}, 置信度={confidence}）"
+        return "ALERT", f"重大更新（烈度={impact}, 置信度={confidence}）"
 
     # 高置信度分析/专家意见 → 推送
     if article_type in ("Analysis_Commentary", "Expert_Opinion") and confidence == "High":
-        return True, "高置信度分析/专家意见"
+        return "ALERT", "高置信度分析/专家意见"
 
-    return False, f"已知文件的常规报道（类型={article_type}, 烈度={impact}），仅入库"
+    return "ROUTINE", f"已知文件的常规报道（类型={article_type}, 烈度={impact}），常规动态"
 
 
 def _apply_number_sanitizer(data, fetched_text):
@@ -1209,8 +1214,8 @@ def _notion_search_pages(official_name, fallback_name=""):
     # 2. 构造前缀与简称/缩写匹配
     prefixes = []
     
-    # 提取缩写
-    acronyms = re.findall(r'(?<![a-zA-Z])([A-Z]{3,5})(?![a-zA-Z])', target_name)
+    # 提取缩写 (v5.8: 支持包含数字和连字符的复杂编号，如 SP8000-26)
+    acronyms = re.findall(r'(?<![a-zA-Z])([A-Z]{2,8}[0-9A-Z-]*)(?![a-zA-Z])', target_name)
     exclude_acr = {"DRC", "EU", "USA", "UK", "G7", "REE", "NPI", "DSI", "RKAB", "BUMN", "ESDM"}
     for acr in acronyms:
         if acr not in exclude_acr:
@@ -2493,15 +2498,15 @@ def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None
         baseline = _strip_sanitizer_markers(si_data.get("industry_baseline_recall", ""))
         deduction = _strip_sanitizer_markers(event.get("event_impact_deduction") or si_data.get("impact_deduction", ""))
 
-        lines = [title_line]
+        lines = [title_line + "  "]
         if paradigm_block:
-            lines.append(paradigm_block)
-        lines.append(f"🏛 {authority} · {doc_type} ｜ 💎 {minerals_str} ｜ {stage_line}")
-        lines.append(f"⚖️ 冲击烈度：<font color='{impact_color}'>{impact_emoji} {_fmt_impact(impact)}</font> ｜ 🎯 置信度：{conf_emoji} {_CONFIDENCE_ZH_MAP.get(confidence, confidence)}")
+            lines.append(paradigm_block + "  ")
+        lines.append(f"🏛 {authority} · {doc_type} ｜ 💎 {minerals_str} ｜ {stage_line}  ")
+        lines.append(f"⚖️ 冲击烈度：<font color='{impact_color}'>{impact_emoji} {_fmt_impact(impact)}</font> ｜ 🎯 置信度：{conf_emoji} {_CONFIDENCE_ZH_MAP.get(confidence, confidence)}  ")
         lines.append("---")
-        lines.append(f"**📜 核心事实**\n> {factual if factual else '(未提取到事实层内容)'}\n")
-        lines.append(f"**⚓ 历史基线对照**\n{baseline if baseline else '(未提取到基线层内容)'}\n")
-        lines.append(f"**🔮 节点推演**\n{deduction if deduction else '(未提取到分析层内容)'}\n")
+        lines.append(f"**📜 核心事实**\n> {factual if factual else '(未提取到事实层内容)'}  ")
+        lines.append(f"**⚓ 历史基线对照**\n> {baseline if baseline else '(未提取到基线层内容)'}  ")
+        lines.append(f"**🔮 节点推演**\n> {deduction if deduction else '(未提取到分析层内容)'}  ")
         lines.append(_fmt_source_link(source_url))
         return "\n".join(lines)
 
@@ -2522,12 +2527,13 @@ def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None
         if not event.get("routine_brief") and len(event_summary) > 120:
             event_summary = event_summary[:120] + "..."
 
-        line = (
-            f"⚪ **【常规/评论】{name_cn}** [{country_zh}]\n"
-            f"  ⚖️ 冲击烈度：{impact_emoji} {_fmt_impact(impact)} ｜ 🔗 [查看原文]({source_url})\n"
-            f"  📝 **动态简述**：{event_summary}"
-        )
-        return line
+        lines = [
+            f"⚪ **【常规动态】{name_cn}** [{country_zh}]  ",
+            f"⚖️ 冲击烈度：{impact_emoji} {_fmt_impact(impact)}  ",
+            f"📝 **动态简述**：{event_summary}  ",
+            _fmt_source_link(source_url)
+        ]
+        return "\n".join(lines)
 
     # 按照矿种分组：Lithium, Cobalt, Nickel, Others
     groups = {
@@ -2871,16 +2877,18 @@ if __name__ == "__main__":
                     logger.info(f"🔇 [语义Diff] 无质变，MUTE。")
 
             # ---- v4.5: 文档生命周期推送判定 ----
-            should_push, push_reason = _should_push(
+            push_action, push_reason = _should_push(
                 analysis_result, fetched_text=fetched_text,
                 source_depth=source_depth, is_new_document=is_new_doc
             )
 
-            if should_push:
+            if push_action == "ALERT":
                 pending_alerts.append((analysis_result, source_url))
                 logger.warning(f"🚨 [推送] {push_reason}")
-            else:
+            elif push_action == "ROUTINE":
                 silent_policies.append((analysis_result, source_url))
+                logger.info(f"⚪ [常规动态] {push_reason}")
+            else:
                 logger.info(f"🤫 [静默入库] {push_reason}")
 
     # ---- v3.5: 汇总推送 ----

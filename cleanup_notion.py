@@ -80,66 +80,67 @@ def get_chinese_name(page):
 
 def _calculate_title_similarity(s1, s2):
     """
-    v5.5: 语义相似度校验：计算两个政策标题的重合度，并应用年份/缩写防误判规则。
-    对中文进行噪声过滤后计算字符重合度，对英文使用单词 Token 级 Jaccard。
-    支持括号内简称/全称递归比对。
+    v6.0: 语义相似度校验：计算两个政策标题的重合度，并应用年份/缩写防误判规则。
+    修复 v5.5 括号内英文简称在中文 overlap 分支中误碰大长文导致误判的漏洞。
+    直接剔除括号修饰成分，并将中英文相似度计算分支进行汉字/英文分词级强隔离。
     """
     if not s1 or not s2:
         return False
 
+    # 0. 去除所有的括号及其内容，防止非特异性的括号内容（如年份、阶段）干扰相似度计算
+    s1_clean_br = re.sub(r'[（\(].*?[）\)]', '', s1).strip()
+    s2_clean_br = re.sub(r'[（\(].*?[）\)]', '', s2).strip()
+
+    if not s1_clean_br or not s2_clean_br:
+        return False
+
     # 1. 强力防误判：年份不一致直接判定不相同
-    years1 = set(re.findall(r'(?<!\d)(20[2-3]\d)(?!\d)', s1))
-    years2 = set(re.findall(r'(?<!\d)(20[2-3]\d)(?!\d)', s2))
+    years1 = set(re.findall(r'(?<!\d)(20[2-3]\d)(?!\d)', s1_clean_br))
+    years2 = set(re.findall(r'(?<!\d)(20[2-3]\d)(?!\d)', s2_clean_br))
     if years1 and years2 and years1 != years2:
         return False
 
     # 2. 强力防误判：特有英文缩写（如 CSDDD, CSRD）不一致直接判定不相同
-    acronyms1 = set(re.findall(r'(?<![a-zA-Z])([A-Z]{3,5})(?![a-zA-Z])', s1))
-    acronyms2 = set(re.findall(r'(?<![a-zA-Z])([A-Z]{3,5})(?![a-zA-Z])', s2))
+    acronyms1 = set(re.findall(r'(?<![a-zA-Z])([A-Z]{3,5})(?![a-zA-Z])', s1_clean_br))
+    acronyms2 = set(re.findall(r'(?<![a-zA-Z])([A-Z]{3,5})(?![a-zA-Z])', s2_clean_br))
     exclude_acr = {"DRC", "EU", "USA", "UK", "G7", "REE", "NPI", "DSI", "RKAB", "BUMN", "ESDM"}
     acronyms1 = acronyms1 - exclude_acr
     acronyms2 = acronyms2 - exclude_acr
     if acronyms1 and acronyms2 and acronyms1 != acronyms2:
         return False
 
-    # 3. 递归比对括号内容
-    p1 = re.findall(r'[（\(]([^）\)]+)[）\)]', s1)
-    p2 = re.findall(r'[（\(]([^）\)]+)[）\)]', s2)
-    for part in p1:
-        part_clean = part.strip()
-        if len(part_clean) >= 3 and part_clean.upper() not in {"EU", "USA", "UK", "G7"}:
-            if _calculate_title_similarity(part_clean, re.sub(r'[（\(].*?[）\)]', '', s2).strip()):
-                return True
-    for part in p2:
-        part_clean = part.strip()
-        if len(part_clean) >= 3 and part_clean.upper() not in {"EU", "USA", "UK", "G7"}:
-            if _calculate_title_similarity(re.sub(r'[（\(].*?[）\)]', '', s1).strip(), part_clean):
-                return True
+    # 3. 判断是否都包含中文，且中文核部分足够长
+    has_zh1 = any('\u4e00' <= char <= '\u9fff' for char in s1_clean_br)
+    has_zh2 = any('\u4e00' <= char <= '\u9fff' for char in s2_clean_br)
 
-    # 4. 判断是否包含中文
-    has_zh1 = any('\u4e00' <= char <= '\u9fff' for char in s1)
-    has_zh2 = any('\u4e00' <= char <= '\u9fff' for char in s2)
+    if has_zh1 and has_zh2:
+        s1_clean = clean_chinese_title_noise(s1_clean_br.lower().replace(" ", ""))
+        s2_clean = clean_chinese_title_noise(s2_clean_br.lower().replace(" ", ""))
+        
+        # 仅保留纯汉字字符，彻底排除英文字母/数字在中文分支的 overlap 碰撞
+        s1_zh = "".join(c for c in s1_clean if '\u4e00' <= c <= '\u9fff')
+        s2_zh = "".join(c for c in s2_clean if '\u4e00' <= c <= '\u9fff')
+        
+        if len(s1_zh) >= 3 and len(s2_zh) >= 3:
+            set1 = set(s1_zh)
+            set2 = set(s2_zh)
+            common = set1.intersection(set2)
+            overlap_ratio = len(common) / min(len(set1), len(set2)) if min(len(set1), len(set2)) > 0 else 0.0
+            jaccard_ratio = len(common) / len(set1.union(set2)) if len(set1.union(set2)) > 0 else 0.0
+            return overlap_ratio >= 0.85 or jaccard_ratio >= 0.65
 
-    if has_zh1 or has_zh2:
-        s1_clean = clean_chinese_title_noise(s1.lower().replace(" ", ""))
-        s2_clean = clean_chinese_title_noise(s2.lower().replace(" ", ""))
-        if not s1_clean or not s2_clean:
-            return False
-        set1 = set(s1_clean)
-        set2 = set(s2_clean)
-        common = set1.intersection(set2)
-        overlap_ratio = len(common) / min(len(set1), len(set2)) if min(len(set1), len(set2)) > 0 else 0.0
-        jaccard_ratio = len(common) / len(set1.union(set2)) if len(set1.union(set2)) > 0 else 0.0
-        return overlap_ratio >= 0.85 or jaccard_ratio >= 0.65
-    else:
-        set1 = get_tokens(s1)
-        set2 = get_tokens(s2)
-        if not set1 or not set2:
-            return False
-        common = set1.intersection(set2)
-        overlap_ratio = len(common) / min(len(set1), len(set2))
-        jaccard_ratio = len(common) / len(set1.union(set2))
-        return overlap_ratio >= 0.85 or jaccard_ratio >= 0.60
+    # 4. 若不满足双中文条件，则剔除所有中文字符后，使用英文 Token 级 Jaccard / Overlap 比对
+    s1_en = re.sub(r'[\u4e00-\u9fff]', ' ', s1_clean_br)
+    s2_en = re.sub(r'[\u4e00-\u9fff]', ' ', s2_clean_br)
+    
+    set1 = get_tokens(s1_en)
+    set2 = get_tokens(s2_en)
+    if not set1 or not set2:
+        return False
+    common = set1.intersection(set2)
+    overlap_ratio = len(common) / min(len(set1), len(set2))
+    jaccard_ratio = len(common) / len(set1.union(set2))
+    return overlap_ratio >= 0.85 or jaccard_ratio >= 0.60
 
 
 def merge_notion_pages(keep_id, dup_id):
@@ -238,38 +239,10 @@ def main():
     merge_targets = {}
     reasons = {}
     
-    # 1. 垃圾自媒体/非官方信源监测
-    garbage_domains = ["legalinsurrection.com", "blogspot.com", "wordpress.com", "livejournal.com", "tumblr.com"]
-    for page in pages:
-        props = page.get("properties", {})
-        pid = page["id"]
-        title = get_title(page)
-        
-        url_prop = props.get("原文链接", {})
-        url = url_prop.get("url", "") or ""
-        factual_text = get_text_from_rich_text(props.get("事实依据", ""))
-        summary_text = get_text_from_rich_text(props.get("要点摘要", ""))
-        full_text = f"{title} {url} {factual_text} {summary_text}".lower()
-        
-        is_garbage = False
-        matched = ""
-        for dom in garbage_domains:
-            if dom in full_text:
-                is_garbage = True
-                matched = dom
-                break
-                
-        if is_garbage:
-            archive_ids.add(pid)
-            reasons[pid] = f"垃圾自媒体污染 (包含 {matched})"
-            print(f"🚨 检出垃圾信源条目: 『{title}』(ID: {pid})")
-
-    # 2. 精确 URL 查重
+    # 1. 精确 URL 查重
     url_groups = {}
     for page in pages:
         pid = page["id"]
-        if pid in archive_ids:
-            continue
         props = page.get("properties", {})
         url_prop = props.get("原文链接", {})
         url = url_prop.get("url") or ""
@@ -292,68 +265,105 @@ def main():
                     reasons[dup_id] = f"相同 URL 去重合并 ({url[:50]}...)"
                     print(f"   🗑️ 待合并重复项: 『{dup_title}』 (ID: {dup_id}) -> 合并至 『{keep_title}』")
 
-    # 3. 前缀聚类与语义去重
-    prefix_groups = {}
-    for page in pages:
-        pid = page["id"]
-        if pid in archive_ids:
+    # 2. 暴力语义查重与相似合并
+    # 遍历所有尚未被合并的页面，执行两两语义查重，确保无遗漏
+    active_pages = [p for p in pages if p["id"] not in archive_ids]
+    
+    similar_groups = []
+    visited_ids = set()
+    for i in range(len(active_pages)):
+        p1 = active_pages[i]
+        id1 = p1["id"]
+        if id1 in visited_ids:
             continue
+        title1 = get_title(p1)
+        cn1 = get_chinese_name(p1)
+        
+        group = [p1]
+        for j in range(i + 1, len(active_pages)):
+            p2 = active_pages[j]
+            id2 = p2["id"]
+            if id2 in visited_ids:
+                continue
+            title2 = get_title(p2)
+            cn2 = get_chinese_name(p2)
             
+            if _calculate_title_similarity(title1, title2) or (cn1 and cn2 and _calculate_title_similarity(cn1, cn2)):
+                group.append(p2)
+                
+        if len(group) > 1:
+            similar_groups.append(group)
+            for p in group:
+                visited_ids.add(p["id"])
+                
+    for group in similar_groups:
+        sorted_group = sorted(group, key=score_page, reverse=True)
+        keep_page = sorted_group[0]
+        keep_title = get_title(keep_page)
+        print(f"⚠️ 检出高度相似政策组，保留最完整版本：『{keep_title}』")
+        for dup in sorted_group[1:]:
+            dup_id = dup["id"]
+            dup_title = get_title(dup)
+            if dup_id not in archive_ids:
+                archive_ids.add(dup_id)
+                merge_targets[dup_id] = keep_page["id"]
+                reasons[dup_id] = "相似政策去重合并"
+                print(f"   🗑️ 待合并重复项: 『{dup_title}』 (ID: {dup_id}) -> 合并至 『{keep_title}』")
+
+    # 3. 垃圾自媒体/非官方信源与新闻污染监测（仅针对尚未有合并目标的活跃页面）
+    garbage_domains = ["legalinsurrection.com", "blogspot.com", "wordpress.com", "livejournal.com", "tumblr.com"]
+    news_domains = [
+        "reuters.com", "bloomberg.com", "cryptobriefing.com", "spglobal.com", "mining.com", "scmp.com"
+    ]
+    news_keywords = [
+        "报道", "称", "预计", "预计将", "计划", "或将", "宣布", "考虑", "讨论", "拟",
+        "Says", "Plans", "Expects", "Considers", "Reports", "Discusses", "Announces",
+        "指出", "表示", "声称", "警告", "透露", "项目", "收购", "招标", "招标编号", "Solicitation"
+    ]
+    exempt_keywords = ["csddd", "csrd", "cbam", "battery regulation", "电池法案", "critical raw materials act"]
+
+    remaining_active = [p for p in pages if p["id"] not in archive_ids]
+    for page in remaining_active:
+        props = page.get("properties", {})
+        pid = page["id"]
         title = get_title(page)
         cn_name = get_chinese_name(page)
         
-        # 英文前缀聚类
-        if title:
-            cleaned_en = clean_title_noise(title)
-            normalized_en = re.sub(r'[（\(].*?[）\)]', '', cleaned_en).strip()
-            words = normalized_en.split()
-            if len(words) >= 3:
-                en_prefix = " ".join(words[:3]).lower()
-                prefix_groups.setdefault(en_prefix, []).append(page)
-            elif len(normalized_en) >= 3:
-                prefix_groups.setdefault(normalized_en.lower(), []).append(page)
+        url_prop = props.get("原文链接", {})
+        url = url_prop.get("url", "") or ""
+        factual_text = get_text_from_rich_text(props.get("事实依据", ""))
+        summary_text = get_text_from_rich_text(props.get("要点摘要", ""))
+        full_text = f"{title} {url} {factual_text} {summary_text}".lower()
+        
+        is_garbage = False
+        matched = ""
+        for dom in garbage_domains:
+            if dom in full_text:
+                is_garbage = True
+                matched = dom
+                break
                 
-        # 中文前缀聚类
-        if cn_name:
-            normalized_cn = cn_name.replace("政策", "").replace("条例", "").replace("法案", "").replace("体系", "").replace("（现行政策）", "").strip()
-            cn_core = clean_chinese_title_noise(normalized_cn)
-            if len(cn_core) >= 3:
-                cn_prefix = cn_core[:5]
-                prefix_groups.setdefault(cn_prefix, []).append(page)
+        if is_garbage:
+            archive_ids.add(pid)
+            reasons[pid] = f"垃圾自媒体污染 (包含 {matched})"
+            print(f"🚨 检出垃圾信源条目: 『{title}』(ID: {pid})")
+            continue
 
-    for prefix, group in prefix_groups.items():
-        if len(group) > 1:
-            matched_pairs = []
-            for i in range(len(group)):
-                for j in range(i + 1, len(group)):
-                    p1 = group[i]
-                    p2 = group[j]
-                    if p1["id"] in archive_ids or p2["id"] in archive_ids:
-                        continue
-                    t1 = get_title(p1)
-                    t2 = get_title(p2)
-                    if _calculate_title_similarity(t1, t2):
-                        matched_pairs.append((p1, p2))
-            
-            if matched_pairs:
-                unique_matched_pages = []
-                for p1, p2 in matched_pairs:
-                    if p1 not in unique_matched_pages: unique_matched_pages.append(p1)
-                    if p2 not in unique_matched_pages: unique_matched_pages.append(p2)
-                
-                sorted_group = sorted(unique_matched_pages, key=score_page, reverse=True)
-                keep_page = sorted_group[0]
-                keep_title = get_title(keep_page)
-                
-                print(f"⚠️ 检出高度相似政策组 (前缀: 『{prefix}』)，保留最完整版本：『{keep_title}』")
-                for dup in sorted_group[1:]:
-                    dup_id = dup["id"]
-                    dup_title = get_title(dup)
-                    if dup_id not in archive_ids:
-                        archive_ids.add(dup_id)
-                        merge_targets[dup_id] = keep_page["id"]
-                        reasons[dup_id] = f"相似政策去重合并 (前缀 '{prefix}')"
-                        print(f"   🗑️ 待合并重复项: 『{dup_title}』 (ID: {dup_id}) -> 合并至 『{keep_title}』")
+        url_lower = url.lower()
+        is_media_url = any(dom in url_lower for dom in news_domains)
+        
+        commercial_keywords = ["收购项目", "项目收购", "资产收购", "招标项目", "招标编号", "Solicitation", "Acquisition of Chemaf", "矿山收购"]
+        is_commercial = any(kw in title or kw in cn_name for kw in commercial_keywords)
+        
+        matched_kws = [kw for kw in news_keywords if kw.lower() in title.lower() or kw in cn_name]
+        is_rumor_keywords = len(matched_kws) >= 2
+        
+        is_exempt = any(ekw in title.lower() or ekw in cn_name.lower() for ekw in exempt_keywords)
+        
+        if (is_commercial or (is_media_url and not is_exempt) or (is_rumor_keywords and not is_exempt)):
+            archive_ids.add(pid)
+            reasons[pid] = "新闻媒体报道或企业商业行为污染"
+            print(f"🚨 检出新闻/商业污染条目: 『{title}』(ID: {pid})")
 
     # 执行归档与合并
     if not archive_ids:

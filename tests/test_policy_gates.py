@@ -158,7 +158,7 @@ class PushGateTests(unittest.TestCase):
 
         should_push, reason = main._should_push(data, is_new_document=False)
 
-        self.assertFalse(should_push)
+        self.assertEqual(should_push, "MUTE")
         self.assertIn("绝对静默", reason)
 
     def test_semantic_diff_mute_wins_over_high_impact(self):
@@ -169,7 +169,7 @@ class PushGateTests(unittest.TestCase):
 
         should_push, reason = main._should_push(data, is_new_document=False)
 
-        self.assertFalse(should_push)
+        self.assertEqual(should_push, "MUTE")
         self.assertIn("语义Diff", reason)
 
     def test_number_sanitizer_hit_blocks_push(self):
@@ -177,7 +177,7 @@ class PushGateTests(unittest.TestCase):
 
         should_push, reason = main._should_push(data, is_new_document=True)
 
-        self.assertFalse(should_push)
+        self.assertEqual(should_push, "MUTE")
         self.assertIn("数字净化", reason)
 
     def test_explicit_notion_gate_false_blocks_push(self):
@@ -185,8 +185,30 @@ class PushGateTests(unittest.TestCase):
 
         should_push, reason = main._should_push(data, is_new_document=True)
 
-        self.assertFalse(should_push)
+        self.assertEqual(should_push, "MUTE")
         self.assertIn("不推送", reason)
+
+    def test_bjnews_media_domain_filtered_from_discovered_sources(self):
+        policy_data = {
+            "news_recency_verification": {"article_type": "Official_Announcement"},
+            "metadata": {"issuing_authority": "中国商务部", "country": "CN"},
+            "policy_dynamics": {"policy_name_zh": "商务部2026年第23号公告"}
+        }
+        res = main.log_discovered_source("https://www.bjnews.com.cn/detail/123.html", policy_data, set(), "/tmp/discovered.yaml")
+        self.assertIsNone(res)
+
+    def test_low_monitoring_impact_routed_to_silent(self):
+        policy_data = {
+            "policy_entity": {"official_name": "US DoD Lithium Procurement", "chinese_translation": "美国国防部锂采购"},
+            "metadata": {"country": "US", "mineral_types": ["Lithium"]},
+            "strategic_implications": {"supply_chain_impact_level": "Low_Monitoring", "analytic_confidence": "High"},
+            "event_update": {"event_classification": "New_Policy_Issuance"}
+        }
+        item = (policy_data, "https://example.com/item")
+        
+        # Test dedupe and alert formatting
+        deduped = main._dedupe_policies([item, item])
+        self.assertEqual(len(deduped), 1)
 
 
 class NotionSignatureDedupeTests(unittest.TestCase):

@@ -26,11 +26,12 @@ This document defines the core domain rules and logic constraints for this speci
   - `_numbers_flagged > 0` 时必须进入人工复核，不得直接推送。
   - `semantic_diff.has_material_change == false` 时保持静默，即使旧文件的烈度字段为高，也不能升级为告警。
 - **自动寻源安全门槛**：`log_discovered_source` 必须且只能在 `article_type == "Official_Announcement"`（官方公告）时，才能提取网址域名并追加至 `discovered_sources.yaml`，严禁将媒体（如 cryptobriefing.com）或分析网站作为官方源沉淀。
-- **Notion 去重与 API 通信底层**：全面调用新版 `NotionSink` 单例，所有的 Notion 查询/新建/PATCH 动作收敛于 `sink.api_request()`。Notion 去重遵循 v5.5 规范：首道防线使用 `原文链接` 精确过滤 URL，第二道防线使用 `policy_entity.official_name` 核心清洗后模糊检索，提取缩写的正则表达式须支持带数字与连字符的复杂编号（如 `SP8000-26-R-0021`），第三道防线使用 `document_signature` 兜底；相似度计算针对英文采用单词词组级 Jaccard (>=0.60) 与 Overlap (>=0.85)，并支持括号内简称/全称的递归比对，防止因行政前缀噪声/翻译错位/简称变体引起重复建档。
+- **Notion 去重与 API 通信底层 (`v6.0`)**：全面调用新版 `NotionSink` 单例，所有的 Notion 查询/新建/PATCH 动作收敛于 `sink.api_request()`。Notion 去重首道防线使用 `原文链接` 精确过滤 URL，第二道防线使用 `policy_entity.official_name` 核心清洗后模糊检索，提取缩写的正则表达式须支持带数字与连字符的复杂编号（如 `SP8000-26-R-0021`），第三道防线使用 `document_signature` 兜底。比对相似度时废除括号简称递归算法以杜绝误碰撞 Bug，直接剔除括号修饰成分做中英分流强隔离判定：只有当两标题均含 3 个以上汉字时，才使用汉字字符集 Overlap (>=0.85) 与 Jaccard (>=0.65) 的中文去底噪比对；否则自动退回纯英文 Token 级 Jaccard (>=0.60) 与 Overlap (>=0.85) 比对，防御英文简称或字母在中文分支中发生碰撞引起误判。
+- **企业商业与媒体吹风硬核过滤 (`v6.0`)**：对于纯企业间商业动作（如资产收购、普通项目招投标、招标合同、常规合资设立等，如 Solicitation 采购项目、Chemaf 矿山资产收购等），【绝对禁止】判定为有效政策，必须拦截。且对于特定新闻媒体（如 Reuters, Bloomberg）的政策吹风和非确定性传闻（weighs, plans, considers 等草案吹风且无具体文件批号），在 LLM Prompt 中通过杀伤开关进行过滤拦截；同时在 Python 代码入库前硬编码 commercial 关键字正则和 rumor 判定规则进行兜底粉碎（is_valid_macro_policy 设为 false 丢弃）。
 - 钉钉输出不得包含 `⚠️` 这类模型自检标记；复核标记仅保留在 Notion 内部字段。
-- 钉钉推送采用 v5.6 智能简报格式：将监测动态按锂、钴、镍、其它关键金属进行分组排版，重磅警告展示完整三层研判，常规动态以紧凑列表合并展现，保障信息完备度。
-- v5.7 监控网拓宽：宏观雷达不仅追踪 10 种特定关键金属，亦涵盖以循环经济、再生回收目标（如再生塑料/钢/铝/镁回收门槛、EPR 生产者延伸责任、报废车辆 ELV 追溯）为切入点且辐射关键原材料供应链的跨行业上位法案。寻源矩阵需在 `policy_keywords` 中涵盖相关回收合规术语，且在 `broad_minerals` 兜底中包含 "critical raw materials" 和 "critical materials" 等概念伞。
-- v5.8 Google News 链接解析与安全过滤：使用升级版的 `resolve_google_news_url` 进行解码。优先通过 `googlenewsdecoder` 解析；若失败则依次尝试离线解析 Base64 编码路径、提取 URL Query 参数；最后通过 `HEAD/GET` 网络重定向和 HTML Canonical 元数据提取进行兜底。所有解析结果必须经过 `_is_valid_news_url` 强过滤规则，排除统计追踪器、广告链接及样式表、脚本、图片等静态资源，防止数据污染。
+- **推送分类分级与防混淆**：在 `send_dingtalk_digest` 中，`Low_Monitoring`（低度监测）事件必须强制隔离移入 `💬 【常规动态】`，严禁挂 `🚨 【重磅预警】` 标签；推送卡片采用 Markdown 引用块（`>`）收纳，标题统一内嵌洗白后的原文 URL `[实体 | 标题](source_url)`。
+- **自适应寻源媒体防污染**：`log_discovered_source` 必须严格通过 `KNOWN_MEDIA_DOMAINS` 过滤器，包含新京报 (`bjnews.com.cn`)、澎湃 (`thepaper.cn`)、财新 (`caixin.com`) 等国内主流新闻媒体，绝对禁止将其域名当作新官方站点推荐。
+- **地缘政策确定性去重**：`_dedupe_policies()` 针对同一轮提取的政策按国家与规范化政策名称执行去重，防止同一法案（如欧盟电池法案授权法案）被多次重复推送。
 
 ## 4. Name Normalization & Cleaners (名称归一化规则)
 <!-- Define mapping lists for data normalization to clean messy source inputs. -->

@@ -190,6 +190,8 @@ def log_discovered_source(source_url: str, policy_data: dict, configured_domains
         "metalbulletin.com", "lme.com", "argusmedia.com", "insider.com",
         "legalinsurrection.com", "apnews.com", "afp.com", "reuters.cn",
         "xinhuanet.com", "people.com.cn", "chinadaily.com.cn", "sinchew.com.my",
+        "bjnews.com.cn", "thepaper.cn", "caixin.com", "cls.cn", "stcn.com",
+        "yicai.com", "oilprice.com", "cryptobriefing.com", "geopolitechs.org",
         "yahoo.com", "google.com", "bing.com", "substack.com", "medium.com",
         "wikipedia.org", "wto.org", "weforum.org", "worldbank.org", "imf.org"
     }
@@ -798,6 +800,8 @@ _SYSTEM_PROMPT_V40 = (
     "  - 农业大宗商品、粮食安全政策\n"
     "若原文仅涉及上述排除品类而未触及 10 种目标矿产，直接判无效。\n"
     "⚠️ 垃圾信源与主观博客拦截铁律：如果新闻来源是时政论坛、自媒体、明显带主观政治立场且缺乏行业公信力的博客（例如 legalinsurrection.com 等博客自媒体文章），必须判定 is_valid_macro_policy=false，直接丢弃。\n"
+    "⚠️ 企业商业活动与采购招标排除铁律：纯企业级商业动作（如企业招投标、采购合同发布、矿企项目普通商业收购、合资项目等，如 Solicitation 采购项目、Chemaf 矿山资产收购等），【绝对禁止】判定为有效政策，必须判定 is_valid_macro_policy=false 并丢弃。本系统仅关注政府或行业组织层面的宏观法案、政府令、关税与进出口管制政策、行业ESG合规准则，不关注普通的商业买卖和企业采购。\n"
+    "⚠️ 时效性传闻拦截铁律：对于新闻媒体爆料的『政府正考虑/探讨/权衡放宽或收紧某政策』（如标题或正文含 'weighs', 'considers', 'plans', 'sources say' 等不确定吹风表态），若无正式公布、生效或进入官方立法/行政程序的确定性政策文本，一律判定为 is_valid_macro_policy=false 并直接丢弃。\n"
     "⚠️ 特别注意：钨、镓、锗、铟是新增的合法目标矿产，这些矿产的出口管制/配额/限制政策必须判定为有效。\n"
     "⚠️ 框架法豁免：若原文是跨行业/跨矿种的供应链安全框架法、反外国制裁法、出口管制通用法、"
     "产业链安全调查办法等上位法/母法，即使正文未提及特定矿种，只要其法律效力可覆盖10种目标矿产的"
@@ -1128,66 +1132,67 @@ def _validate_and_sanitize_future_dates(data):
 
 def _calculate_title_similarity(s1, s2):
     """
-    v5.5: 语义相似度校验：计算两个政策标题的重合度，并应用年份/缩写防误判规则。
-    对中文进行噪声过滤后计算字符重合度，对英文使用单词 Token 级 Jaccard。
-    支持括号内简称/全称递归比对。
+    v6.0: 语义相似度校验：计算两个政策标题的重合度，并应用年份/缩写防误判规则。
+    修复 v5.5 括号内英文简称在中文 overlap 分支中误碰大长文导致误判的漏洞。
+    直接剔除括号修饰成分，并将中英文相似度计算分支进行汉字/英文分词级强隔离。
     """
     if not s1 or not s2:
         return False
 
+    # 0. 去除所有的括号及其内容，防止非特异性的括号内容（如年份、阶段）干扰相似度计算
+    s1_clean_br = re.sub(r'[（\(].*?[）\)]', '', s1).strip()
+    s2_clean_br = re.sub(r'[（\(].*?[）\)]', '', s2).strip()
+
+    if not s1_clean_br or not s2_clean_br:
+        return False
+
     # 1. 强力防误判：年份不一致直接判定不相同
-    years1 = set(re.findall(r'(?<!\d)(20[2-3]\d)(?!\d)', s1))
-    years2 = set(re.findall(r'(?<!\d)(20[2-3]\d)(?!\d)', s2))
+    years1 = set(re.findall(r'(?<!\d)(20[2-3]\d)(?!\d)', s1_clean_br))
+    years2 = set(re.findall(r'(?<!\d)(20[2-3]\d)(?!\d)', s2_clean_br))
     if years1 and years2 and years1 != years2:
         return False
 
     # 2. 强力防误判：特有英文缩写（如 CSDDD, CSRD）不一致直接判定不相同
-    acronyms1 = set(re.findall(r'(?<![a-zA-Z])([A-Z]{3,5})(?![a-zA-Z])', s1))
-    acronyms2 = set(re.findall(r'(?<![a-zA-Z])([A-Z]{3,5})(?![a-zA-Z])', s2))
+    acronyms1 = set(re.findall(r'(?<![a-zA-Z])([A-Z]{3,5})(?![a-zA-Z])', s1_clean_br))
+    acronyms2 = set(re.findall(r'(?<![a-zA-Z])([A-Z]{3,5})(?![a-zA-Z])', s2_clean_br))
     exclude_acr = {"DRC", "EU", "USA", "UK", "G7", "REE", "NPI", "DSI", "RKAB", "BUMN", "ESDM"}
     acronyms1 = acronyms1 - exclude_acr
     acronyms2 = acronyms2 - exclude_acr
     if acronyms1 and acronyms2 and acronyms1 != acronyms2:
         return False
 
-    # 3. 递归比对括号内容
-    p1 = re.findall(r'[（\(]([^）\)]+)[）\)]', s1)
-    p2 = re.findall(r'[（\(]([^）\)]+)[）\)]', s2)
-    for part in p1:
-        part_clean = part.strip()
-        if len(part_clean) >= 3 and part_clean.upper() not in {"EU", "USA", "UK", "G7"}:
-            if _calculate_title_similarity(part_clean, re.sub(r'[（\(].*?[）\)]', '', s2).strip()):
-                return True
-    for part in p2:
-        part_clean = part.strip()
-        if len(part_clean) >= 3 and part_clean.upper() not in {"EU", "USA", "UK", "G7"}:
-            if _calculate_title_similarity(re.sub(r'[（\(].*?[）\)]', '', s1).strip(), part_clean):
-                return True
+    # 3. 判断是否都包含中文，且中文核部分足够长
+    has_zh1 = any('\u4e00' <= char <= '\u9fff' for char in s1_clean_br)
+    has_zh2 = any('\u4e00' <= char <= '\u9fff' for char in s2_clean_br)
 
-    # 4. 判断是否包含中文
-    has_zh1 = any('\u4e00' <= char <= '\u9fff' for char in s1)
-    has_zh2 = any('\u4e00' <= char <= '\u9fff' for char in s2)
+    if has_zh1 and has_zh2:
+        s1_clean = clean_chinese_title_noise(s1_clean_br.lower().replace(" ", ""))
+        s2_clean = clean_chinese_title_noise(s2_clean_br.lower().replace(" ", ""))
+        
+        # 仅保留纯汉字字符，彻底排除英文字母/数字在中文分支的 overlap 碰撞
+        s1_zh = "".join(c for c in s1_clean if '\u4e00' <= c <= '\u9fff')
+        s2_zh = "".join(c for c in s2_clean if '\u4e00' <= c <= '\u9fff')
+        
+        if len(s1_zh) >= 3 and len(s2_zh) >= 3:
+            set1 = set(s1_zh)
+            set2 = set(s2_zh)
+            common = set1.intersection(set2)
+            overlap_ratio = len(common) / min(len(set1), len(set2)) if min(len(set1), len(set2)) > 0 else 0.0
+            jaccard_ratio = len(common) / len(set1.union(set2)) if len(set1.union(set2)) > 0 else 0.0
+            return overlap_ratio >= 0.85 or jaccard_ratio >= 0.65
 
-    if has_zh1 or has_zh2:
-        s1_clean = clean_chinese_title_noise(s1.lower().replace(" ", ""))
-        s2_clean = clean_chinese_title_noise(s2.lower().replace(" ", ""))
-        if not s1_clean or not s2_clean:
-            return False
-        set1 = set(s1_clean)
-        set2 = set(s2_clean)
-        common = set1.intersection(set2)
-        overlap_ratio = len(common) / min(len(set1), len(set2)) if min(len(set1), len(set2)) > 0 else 0.0
-        jaccard_ratio = len(common) / len(set1.union(set2)) if len(set1.union(set2)) > 0 else 0.0
-        return overlap_ratio >= 0.85 or jaccard_ratio >= 0.65
-    else:
-        set1 = get_tokens(s1)
-        set2 = get_tokens(s2)
-        if not set1 or not set2:
-            return False
-        common = set1.intersection(set2)
-        overlap_ratio = len(common) / min(len(set1), len(set2))
-        jaccard_ratio = len(common) / len(set1.union(set2))
-        return overlap_ratio >= 0.85 or jaccard_ratio >= 0.60
+    # 4. 若不满足双中文条件，则剔除所有中文字符后，使用英文 Token 级 Jaccard / Overlap 比对
+    s1_en = re.sub(r'[\u4e00-\u9fff]', ' ', s1_clean_br)
+    s2_en = re.sub(r'[\u4e00-\u9fff]', ' ', s2_clean_br)
+    
+    set1 = get_tokens(s1_en)
+    set2 = get_tokens(s2_en)
+    if not set1 or not set2:
+        return False
+    common = set1.intersection(set2)
+    overlap_ratio = len(common) / min(len(set1), len(set2))
+    jaccard_ratio = len(common) / len(set1.union(set2))
+    return overlap_ratio >= 0.85 or jaccard_ratio >= 0.60
 
 
 def _notion_search_pages(official_name, fallback_name=""):
@@ -2423,6 +2428,29 @@ def _fmt_provisions(text):
     return "\n".join(bullets)
 
 
+def _dedupe_policies(policy_items):
+    """根据国家与规范政策名称去除同一轮中的重复性提炼报道。"""
+    seen_keys = set()
+    deduped = []
+    for item in policy_items:
+        data, url = item
+        if not isinstance(data, dict):
+            continue
+        md = data.get("metadata", {}) or {}
+        pd = data.get("policy_dynamics", {}) or {}
+        pe = data.get("policy_entity", {}) or {}
+        country = md.get("country", "")
+        name = pd.get("policy_name_zh") or pe.get("official_name") or pe.get("chinese_translation") or ""
+        import re
+        norm_name = re.sub(r"\s+", "", str(name).lower())
+        key = f"{country}:{norm_name[:25]}"
+        if key in seen_keys and len(norm_name) > 5:
+            continue
+        seen_keys.add(key)
+        deduped.append(item)
+    return deduped
+
+
 def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None):
     """v5.6: 将本轮政策合并为“地缘政策智能简报”卡片推送，按锂、钴、镍及其他分类排版。"""
     webhook_url = os.environ.get("DINGTALK_WEBHOOK")
@@ -2430,7 +2458,10 @@ def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None
         logger.info("暂未配置钉钉 Webhook，跳过告警触达阶段。")
         return
 
-    silent_policies = silent_policies or []
+    # 同一轮政策先执行确定性去重
+    policies = _dedupe_policies(policies or [])
+    silent_policies = _dedupe_policies(silent_policies or [])
+
     impact_order = {"High_Disruption": 0, "Moderate_Adjustment": 1, "Low_Monitoring": 2}
 
     def _get_mineral_group(data):
@@ -2455,19 +2486,19 @@ def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None
         ec = event.get("event_classification", "")
         if ec == "New_Policy_Issuance":
             alert_label = "🆕 新政首发"
-            impact_color = "#FF0000"
         else:
             alert_label = "🔄 法案演进"
-            impact_color = "#FF9900"
 
         name_cn = entity.get("chinese_translation") or pd_data.get("policy_name_zh") or entity.get("official_name") or "(未命名)"
         name_en = entity.get("official_name", "")
         country_zh = _fmt_country(md_data.get('country', '?'))
 
-        title_line = f"🔴 **【{alert_label}】{name_cn}**"
+        title_text = f"🔴 【{alert_label}】{name_cn}"
         if name_en and name_en != name_cn:
-            title_line += f" ({name_en})"
-        title_line += f" [{country_zh}]"
+            title_text += f" ({name_en})"
+        title_text += f" [{country_zh}]"
+
+        title_link = f"[{title_text}]({source_url})" if source_url else title_text
 
         authority = _fmt_authority(md_data.get("issuing_authority", "")) or "未知机构"
         doc_type = _DOC_TYPE_ZH.get(entity.get("document_type", ""), "") or "其它文件"
@@ -2486,28 +2517,24 @@ def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None
         impact_emoji = _IMPACT_EMOJI.get(impact, "")
         conf_emoji = _CONFIDENCE_EMOJI.get(confidence, "")
 
-        paradigm_block = ""
-        if si_data.get("baseline_shift_detected") is True:
-            paradigm_block = (
-                "> 🚨 **【系统严重警告】历史基线已被彻底打破**\n"
-                "> 本次情报构成对旧基线的颠覆。请注意底层逻辑生变！\n"
-                "> 请核查 knowledge_baselines.yaml 是否需要更新。"
-            )
-
         factual = _strip_sanitizer_markers(pd_data.get("substantive_provisions") or pd_data.get("factual_basis") or "")
         baseline = _strip_sanitizer_markers(si_data.get("industry_baseline_recall", ""))
         deduction = _strip_sanitizer_markers(event.get("event_impact_deduction") or si_data.get("impact_deduction", ""))
 
-        lines = [title_line + "  "]
-        if paradigm_block:
-            lines.append(paradigm_block + "  ")
-        lines.append(f"🏛 {authority} · {doc_type} ｜ 💎 {minerals_str} ｜ {stage_line}  ")
-        lines.append(f"⚖️ 冲击烈度：<font color='{impact_color}'>{impact_emoji} {_fmt_impact(impact)}</font> ｜ 🎯 置信度：{conf_emoji} {_CONFIDENCE_ZH_MAP.get(confidence, confidence)}  ")
-        lines.append("---")
-        lines.append(f"**📜 核心事实**\n> {factual if factual else '(未提取到事实层内容)'}  ")
-        lines.append(f"**⚓ 历史基线对照**\n> {baseline if baseline else '(未提取到基线层内容)'}  ")
-        lines.append(f"**🔮 节点推演**\n> {deduction if deduction else '(未提取到分析层内容)'}  ")
-        lines.append(_fmt_source_link(source_url))
+        lines = [f"### {title_link}"]
+        if si_data.get("baseline_shift_detected") is True:
+            lines.append(
+                "> 🚨 **【系统严重警告】历史基线已被彻底打破**\n"
+                "> 本次情报构成对旧基线的颠覆。请注意底层逻辑生变！"
+            )
+        lines.append(f"> 🏛 {authority} · {doc_type} ｜ 💎 {minerals_str} ｜ {stage_line}")
+        lines.append(f"> ⚖️ 冲击烈度：{impact_emoji} {_fmt_impact(impact)} ｜ 🎯 置信度：{conf_emoji} {_CONFIDENCE_ZH_MAP.get(confidence, confidence)}")
+        lines.append("> ")
+        lines.append(f"> 📜 **核心事实**：{factual if factual else '(未提取到事实层内容)'}")
+        lines.append("> ")
+        lines.append(f"> ⚓ **历史基线对照**：{baseline if baseline else '(未提取到基线层内容)'}")
+        lines.append("> ")
+        lines.append(f"> 🔮 **节点推演**：{deduction if deduction else '(未提取到分析层内容)'}")
         return "\n".join(lines)
 
     def _format_silent_policy(data, source_url):
@@ -2527,11 +2554,13 @@ def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None
         if not event.get("routine_brief") and len(event_summary) > 120:
             event_summary = event_summary[:120] + "..."
 
+        title_text = f"⚪ **【常规动态】{name_cn}** [{country_zh}]"
+        title_link = f"[{title_text}]({source_url})" if source_url else title_text
+
         lines = [
-            f"⚪ **【常规动态】{name_cn}** [{country_zh}]  ",
-            f"⚖️ 冲击烈度：{impact_emoji} {_fmt_impact(impact)}  ",
-            f"📝 **动态简述**：{event_summary}  ",
-            _fmt_source_link(source_url)
+            f"### {title_link}",
+            f"> ⚖️ 冲击烈度：{impact_emoji} {_fmt_impact(impact)}",
+            f"> 📝 **动态简述**：{event_summary}"
         ]
         return "\n".join(lines)
 
@@ -2543,10 +2572,17 @@ def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None
         "Others": {"alerts": [], "silent": []}
     }
 
+    # 重磅告警 vs 常规动态严格依冲击烈度进行分流
     for item in policies:
         data, url = item
+        si_data = data.get("strategic_implications", {}) or {}
+        impact_level = si_data.get("supply_chain_impact_level", "")
         grp = _get_mineral_group(data)
-        groups[grp]["alerts"].append(item)
+        # 低度监测强制放入 silent (常规动态)
+        if impact_level == "Low_Monitoring":
+            groups[grp]["silent"].append(item)
+        else:
+            groups[grp]["alerts"].append(item)
 
     for item in silent_policies:
         data, url = item
@@ -2561,9 +2597,14 @@ def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None
     }
 
     group_blocks = []
+    total_alerts_count = 0
+    total_silent_count = 0
+
     for grp in ["Lithium", "Cobalt", "Nickel", "Others"]:
         title_block = group_titles[grp]
         grp_data = groups[grp]
+        total_alerts_count += len(grp_data["alerts"])
+        total_silent_count += len(grp_data["silent"])
 
         if grp_data["alerts"] or grp_data["silent"]:
             section_lines = [f"\n━━━━━━━━━━━━━━━━━━━━━━\n### {title_block}"]
@@ -2589,7 +2630,7 @@ def send_dingtalk_digest(policies, silent_policies=None, discovered_sources=None
     header = (
         f"📡 **【宏观政策雷达】关键矿产地缘政策周报**\n"
         f"📅 **简报时间**：{datetime.now().strftime('%Y-%m-%d')}\n"
-        f"📊 **监测概览**：🔴 重磅预警 {len(policies)} 条 ｜ ⚪ 常规动态 {len(silent_policies)} 条"
+        f"📊 **监测概览**：🔴 重磅预警 {total_alerts_count} 条 ｜ ⚪ 常规动态 {total_silent_count} 条"
     )
 
     discovery_section = ""
@@ -2763,6 +2804,27 @@ if __name__ == "__main__":
                 logger.warning(f"⚠️ DeepSeek 返回 JSON 缺少关键字段: {missing}，跳过本条。")
                 cb.record_empty(source.get("feed_type", ""))
                 continue
+
+            # ---- v6.0 商业活动与招标 Python 级硬编码兜底拦截 ----
+            pe = analysis_result.get("policy_entity", {}) or {}
+            pd_check = analysis_result.get("policy_dynamics", {}) or {}
+            official_name = pe.get("official_name") or pd_check.get("policy_name_original") or ""
+            chinese_name = pe.get("chinese_translation") or pd_check.get("policy_name_zh") or ""
+            
+            # 检测是否含有企业商业动作关键字（如普通资产收购、项目招投标、合资企业普通公告等）
+            commercial_keywords = ["收购项目", "招标项目", "项目收购", "资产收购", "招标编号", "Solicitation", "Acquisition of Chemaf", "矿山收购"]
+            is_commercial = any(kw in official_name or kw in chinese_name for kw in commercial_keywords)
+            
+            # 对特定媒体来源的传闻吹风（weighs, plans, considers）且没有确定性法案编号/属于草案阶段进行硬过滤
+            source_url = source.get("url", "") or ""
+            media_domains = ["reuters.com", "bloomberg.com", "cryptobriefing.com"]
+            is_media = any(dom in source_url for dom in media_domains)
+            
+            is_rumor = is_media and pe.get("current_stage") in ("Proposal", "Under_Debate") and pe.get("document_type") == "Other"
+            
+            if is_commercial or is_rumor:
+                logger.info(f"🗑️ [Python 级噪音硬粉碎] 检出纯企业商业行为或媒体传闻，已强行丢弃。名称: {official_name} / {chinese_name}")
+                analysis_result["is_valid_macro_policy"] = False
 
             # ---- v3.5 噪音粉碎：最高优先级杀伤开关 ----
             # LLM 明确判定为无效输入（网页导航/无关新闻/纯内政），直接丢弃

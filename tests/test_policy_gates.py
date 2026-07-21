@@ -91,6 +91,12 @@ def _install_radar_infra_stubs():
             self.message = message
             self.response_text = response_text
 
+    try:
+        from radar_infra.guard import is_known_media_domain
+    except ImportError:
+        def is_known_media_domain(url_or_domain):
+            return "bjnews.com.cn" in str(url_or_domain) or "reuters.com" in str(url_or_domain)
+
     llm.DeepSeekProvider = DeepSeekProvider
     llm.CachedLLMClient = CachedLLMClient
     llm.create_llm_retry_decorator = create_llm_retry_decorator
@@ -101,6 +107,7 @@ def _install_radar_infra_stubs():
     guard.clean_title_noise = clean_title_noise
     guard.get_tokens = get_tokens
     guard.calculate_title_similarity = calculate_title_similarity
+    guard.is_known_media_domain = is_known_media_domain
     sink.send_dingtalk = send_dingtalk
     sink.NotionSink = NotionSink
     sink.NotionAPIError = NotionAPIError

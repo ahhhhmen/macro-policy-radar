@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from radar_infra.llm import DeepSeekProvider, CachedLLMClient, create_llm_retry_decorator
-from radar_infra.guard import CircuitBreaker, sanitize_numbers, safe_json_parse, clean_chinese_title_noise, clean_title_noise, get_tokens, calculate_title_similarity
+from radar_infra.guard import CircuitBreaker, sanitize_numbers, safe_json_parse, clean_chinese_title_noise, clean_title_noise, get_tokens, calculate_title_similarity, is_known_media_domain
 from radar_infra.sink import send_dingtalk, NotionSink, NotionAPIError
 from radar_infra.support import setup_logging
 from radar_infra.fetch import fetch_html, extract_article_body
@@ -183,26 +183,7 @@ def log_discovered_source(source_url: str, policy_data: dict, configured_domains
         return None
 
     # v5.3: 排除已知的主流新闻媒体、大宗商品自媒体与博客域名，防止自适应寻源候选池被污染
-    KNOWN_MEDIA_DOMAINS = {
-        "reuters.com", "bloomberg.com", "mining.com", "miningweekly.com", 
-        "scmp.com", "ft.com", "nytimes.com", "wsj.com", "economist.com",
-        "spglobal.com", "woodmac.com", "fitchratings.com", "platts.com",
-        "metalbulletin.com", "lme.com", "argusmedia.com", "insider.com",
-        "legalinsurrection.com", "apnews.com", "afp.com", "reuters.cn",
-        "xinhuanet.com", "people.com.cn", "chinadaily.com.cn", "sinchew.com.my",
-        "bjnews.com.cn", "thepaper.cn", "caixin.com", "cls.cn", "stcn.com",
-        "yicai.com", "oilprice.com", "cryptobriefing.com", "geopolitechs.org",
-        "yahoo.com", "google.com", "bing.com", "substack.com", "medium.com",
-        "wikipedia.org", "wto.org", "weforum.org", "worldbank.org", "imf.org"
-    }
-    domain_parts = domain.split(".")
-    is_media = False
-    for i in range(len(domain_parts) - 1):
-        parent_domain = ".".join(domain_parts[i:])
-        if parent_domain in KNOWN_MEDIA_DOMAINS:
-            is_media = True
-            break
-    if is_media:
+    if is_known_media_domain(source_url) or is_known_media_domain(domain):
         return None
 
     # 模糊匹配：判断 domain 是否在已知的 whitelist 域名中

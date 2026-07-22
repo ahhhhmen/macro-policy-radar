@@ -428,3 +428,123 @@ macro_sources:
     enabled: true
     notes: "v5.7 新增：专门捕获全球范围内针对金属与电池原材料回收、循环经济立法的行业解读与政策动态"
 
+  # ---- v5.8 新增：汽车、电池与大宗商品全球行业资讯与政策雷达 ----
+  - id: "global_ithome_auto_policy"
+    country: "CN"
+    agency: "IT之家 (科技/汽车/电池供应链政策)"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:ithome.com+(\"电池\"+OR+\"关键矿产\"+OR+\"供应链\"+OR+\"关税\"+OR+\"补贴\"+OR+\"法规\")&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+    enabled: true
+
+  - id: "global_autohome_industry_policy"
+    country: "CN"
+    agency: "汽车之家 (行业频道/政策与材料供应链)"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:autohome.com.cn+(\"电池\"+OR+\"原材料\"+OR+\"供应链\"+OR+\"双碳\"+OR+\"关税\")&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+    enabled: true
+
+  - id: "global_acea_policy"
+    country: "EU"
+    agency: "ACEA 欧洲汽车工业协会"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:acea.auto+(\"battery\"+OR+\"CRMA\"+OR+\"CSDDD\"+OR+\"trade\"+OR+\"emissions\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+
+  - id: "global_am_online_policy"
+    country: "EU"
+    agency: "Automotive Management Online"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:am-online.com+(\"battery\"+OR+\"regulation\"+OR+\"supply+chain\"+OR+\"tariff\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+
+  - id: "global_dw_auto_policy"
+    country: "DE"
+    agency: "Deutsche Welle 德国之声 (汽车与工业)"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:dw.com+(\"battery\"+OR+\"auto\"+OR+\"tariff\"+OR+\"China\"+OR+\"supply+chain\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+
+  - id: "global_reuters_autos_policy"
+    country: "GLOBAL"
+    agency: "Reuters 路透社 (汽车与交通)"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:reuters.com+(\"autos\"+OR+\"battery\"+OR+\"EV\"+OR+\"cobalt\"+OR+\"lithium\"+OR+\"tariff\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+
+  - id: "global_autonews_policy"
+    country: "GLOBAL"
+    agency: "Automotive News (汽车新闻)"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:autonews.com+(\"battery\"+OR+\"EV\"+OR+\"supply+chain\"+OR+\"regulation\"+OR+\"plant\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+
+  - id: "global_electrive_policy"
+    country: "EU"
+    agency: "Electrive (欧洲新能源与电池)"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:electrive.com+(\"battery\"+OR+\"EV\"+OR+\"Gigafactory\"+OR+\"raw+materials\"+OR+\"policy\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+
+  - id: "global_insideevs_policy"
+    country: "GLOBAL"
+    agency: "InsideEVs (电动汽车与电池技术)"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:insideevs.com+(\"battery\"+OR+\"EV\"+OR+\"supply+chain\"+OR+\"degradation\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+
+  - id: "global_electrek_policy"
+    country: "US"
+    agency: "Electrek (北美与全球电动汽车)"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:electrek.co+(\"battery\"+OR+\"EV\"+OR+\"supply+chain\"+OR+\"investigation\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+
+  - id: "global_cleantechnica_policy"
+    country: "GLOBAL"
+    agency: "CleanTechnica (清洁交通与法规)"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:cleantechnica.com+(\"battery\"+OR+\"EV\"+OR+\"supply+chain\"+OR+\"emissions\"+OR+\"policy\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+
+  - id: "global_theevreport_policy"
+    country: "GLOBAL"
+    agency: "The EV Report (B2B 制造与供应链)"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:theevreport.com+(\"battery\"+OR+\"EV\"+OR+\"supply+chain\"+OR+\"manufacturing\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+
+  - id: "global_gasgoo_policy"
+    country: "CN"
+    agency: "盖世汽车 (Gasgoo 全球供应链)"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:gasgoo.com+(\"battery\"+OR+\"supply+chain\"+OR+\"CATL\"+OR+\"Huayou\"+OR+\"installation\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+
+  - id: "global_autonews_europe_policy"
+    country: "EU"
+    agency: "Automotive News Europe"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:europe.autonews.com+(\"battery\"+OR+\"EV\"+OR+\"supply+chain\"+OR+\"tariff\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+
+  - id: "global_paultan_policy"
+    country: "ASEAN"
+    agency: "Paul Tan (东南亚汽车与矿产)"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:paultan.org+(\"battery\"+OR+\"EV\"+OR+\"Indonesia\"+OR+\"nickel\"+OR+\"supply+chain\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+
+  - id: "global_benchmark_policy"
+    country: "GLOBAL"
+    agency: "Benchmark Mineral Intelligence"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:benchmarkminerals.com+(\"lithium\"+OR+\"cobalt\"+OR+\"nickel\"+OR+\"battery\"+OR+\"minerals\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+
+  - id: "global_fastmarkets_policy"
+    country: "GLOBAL"
+    agency: "Fastmarkets (电池大宗原材料)"
+    feed_type: "rss"
+    url: "https://news.google.com/rss/search?q=site:fastmarkets.com+(\"battery\"+OR+\"lithium\"+OR+\"cobalt\"+OR+\"nickel\"+OR+\"black+mass\")&hl=en-US&gl=US&ceid=US:en"
+    enabled: true
+
